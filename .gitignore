@@ -1,0 +1,8 @@
+/target/
+/models/
+/transcripts/
+/data/
+/dist/
+/gateway.toml
+/.lxmf-outbox.sqlite3*
+__pycache__/

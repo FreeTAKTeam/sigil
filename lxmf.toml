@@ -1,0 +1,13 @@
+[radio]
+frequency_hz = 435995000
+
+[lxmf]
+enabled = true
+sender_name = "R4"
+destination = "e3835c698508d634b67525242309dd76"
+# Use the HTTP bind address of the running Fabric or YARA instance.
+api_base_url = "http://127.0.0.1:9337"
+delivery_method = "direct"
+forward_bss = false
+timeout_seconds = 15
+retry_attempts = 3

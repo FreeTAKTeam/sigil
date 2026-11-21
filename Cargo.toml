@@ -1,0 +1,54 @@
+[package]
+name = "r3akt-sigil"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+license = "GPL-2.0-or-later"
+description = "Headless offline transcription of analog NFM radio"
+
+[features]
+parakeet = ["dep:sherpa-onnx"]
+
+[dependencies]
+anyhow = "1"
+argon2 = "0.5"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap = { version = "4.5", features = ["derive"] }
+ctrlc = "3"
+hound = "3.5"
+hex = "0.4"
+librtlsdr-rs = "=0.3.0"
+lxmf-core = { package = "lxmf-wire", git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "008bf9e1cbc2b3f6859abf21f64dfdb87be8621f" }
+lxmf-runtime = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "008bf9e1cbc2b3f6859abf21f64dfdb87be8621f" }
+lxmf-sdk = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "008bf9e1cbc2b3f6859abf21f64dfdb87be8621f", default-features = false, features = ["std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+r3akt-map-core = { git = "https://github.com/FreeTAKTeam/Reticulum-Community-Hub.git", rev = "82f72e97326e7a6d341456c4ce88ca94240369ca", default-features = false }
+rmp-serde = "1"
+rmpv = "1"
+rns-transport = { package = "reticulum-rs-transport", git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "008bf9e1cbc2b3f6859abf21f64dfdb87be8621f" }
+rubato = "0.16"
+rusb = { version = "0.9", features = ["vendored"] }
+sdr-dsp = { git = "https://github.com/jasonherald/rtl-sdr", rev = "4380abf4eb7e74953623d063477f89f9b47876d6" }
+sdr-types = { git = "https://github.com/jasonherald/rtl-sdr", rev = "4380abf4eb7e74953623d063477f89f9b47876d6" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sherpa-onnx = { version = "=2.0.2", default-features = false, features = ["shared"], optional = true }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+toml = "0.8"
+whisper-rs = "0.16"
+yodel = { version = "=0.2.0", default-features = false, features = ["demod", "ax25"] }
+zeroize = "1"
+
+[dev-dependencies]
+yodel = { version = "=0.2.0", default-features = false, features = ["mod"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

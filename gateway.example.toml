@@ -1,0 +1,18 @@
+[processing]
+parallel_voice_bss = true
+correlation_timeout_ms = 5000
+
+[identity]
+auto_register = true
+registry_path = "data/identities"
+allowlist = ["Corvo", "BLACKY"]
+
+[fabric]
+tcp_clients = []
+local_storage_path = "data/fabric"
+
+[rch]
+enabled = false
+destination_hash = ""
+send_chat = true
+send_telemetry = true
