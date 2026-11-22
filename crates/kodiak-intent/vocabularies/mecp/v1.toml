@@ -1,4 +1,4 @@
-# Kodiak MECP voice vocabulary, version 1, revision 8.
+# Kodiak MECP voice vocabulary, version 1, revision 9.
 #
 # Codes, labels and severities follow the canonical MECP tables:
 #   REM  apps/mobile/src/utils/mecp.ts               (commit 3e1e172)
@@ -20,7 +20,7 @@
 
 schema = "kodiak.vocabulary.mecp"
 version = 1
-revision = 8
+revision = 9
 
 # Words that may surround an MECP report without changing its meaning.
 fillers = ["we", "i", "a", "an", "the", "is", "are", "am", "please", "more", "some",
@@ -110,7 +110,8 @@ words = ["mayday", "may day", "may they", "made a", "medei", "may die"]
 [[severities]]
 level = 1
 label = "Urgent"
-words = ["urgent", "urgently"]
+# Corvo's "urgent" was heard as "urging" over live NFM (22 November 2026).
+words = ["urgent", "urgently", "urging"]
 
 [[severities]]
 level = 2
@@ -314,7 +315,7 @@ phrases = ["air quality danger", "air quality", "smoke", "toxic air", "bad air"]
 [[codes]]
 code = "W06"
 label = "Tsunami / tidal surge warning"
-phrases = ["tsunami", "tsunami warning", "tidal surge", "storm surge"]
+phrases = ["tsunami", "tsunami warning", "tidal surge", "storm surge", "tidal surge warning", "tsunami tidal surge warning", "storm surge warning"]
 
 # Supplies
 [[codes]]
