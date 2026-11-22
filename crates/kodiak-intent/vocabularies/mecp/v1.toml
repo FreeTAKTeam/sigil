@@ -1,4 +1,4 @@
-# Kodiak MECP voice vocabulary, version 1, revision 7.
+# Kodiak MECP voice vocabulary, version 1, revision 8.
 #
 # Codes, labels and severities follow the canonical MECP tables:
 #   REM  apps/mobile/src/utils/mecp.ts               (commit 3e1e172)
@@ -20,7 +20,7 @@
 
 schema = "kodiak.vocabulary.mecp"
 version = 1
-revision = 7
+revision = 8
 
 # Words that may surround an MECP report without changing its meaning.
 fillers = ["we", "i", "a", "an", "the", "is", "are", "am", "please", "more", "some",
@@ -595,7 +595,7 @@ phrases = ["dangerous person", "threat nearby", "threat", "armed person"]
 [[codes]]
 code = "X02"
 label = "Area unsafe - avoid"
-phrases = ["area unsafe", "unsafe area", "avoid area", "avoid the area"]
+phrases = ["area unsafe", "unsafe area", "avoid area", "avoid the area", "area unsafe avoid"]
 
 [[codes]]
 code = "X03"
@@ -610,7 +610,7 @@ phrases = ["civil unrest", "unrest", "riot", "crowd danger", "dangerous crowd"]
 [[codes]]
 code = "X05"
 label = "Theft / looting reported"
-phrases = ["theft", "looting", "looters", "robbery"]
+phrases = ["theft", "looting", "looters", "robbery", "looting reported", "theft reported", "muting reported"]
 
 [[codes]]
 code = "X06"
@@ -636,12 +636,12 @@ phrases = ["have food", "have food available", "food available"]
 [[codes]]
 code = "H03"
 label = "Have medical supplies"
-phrases = ["have medical supplies", "have medical", "medical supplies available"]
+phrases = ["have medical supplies", "have medical", "medical supplies available", "aid medical supplies"]
 
 [[codes]]
 code = "H04"
 label = "Have power / charging"
-phrases = ["have power", "have charging", "power available", "charging available"]
+phrases = ["have power", "have charging", "power available", "charging available", "have power charging", "power charging"]
 
 [[codes]]
 code = "H05"
@@ -651,35 +651,35 @@ phrases = ["have fuel", "fuel available"]
 [[codes]]
 code = "H06"
 label = "Have tools / equipment"
-phrases = ["have tools", "have equipment", "tools available", "equipment available"]
+phrases = ["have tools", "have equipment", "tools available", "equipment available", "have tools equipment", "ave tools"]
 
 [[codes]]
 code = "H07"
 label = "Have shelter / space for [N]pax"
-phrases = ["have shelter", "have space", "space available", "shelter for", "space for"]
+phrases = ["have shelter", "have space", "space available", "shelter for", "space for", "ape shelter"]
 # Accepts an optional number of people, encoded as an Npax token.
 argument = "pax"
 
 [[codes]]
 code = "H08"
 label = "Have transport / vehicle"
-phrases = ["have transport", "have vehicle", "have a vehicle", "transport available"]
+phrases = ["have transport", "have vehicle", "have a vehicle", "transport available", "have transport vehicle", "ace transport"]
 
 # Beacon
 [[codes]]
 code = "B01"
 label = "Automated distress beacon active"
-phrases = ["distress beacon", "distress beacon active", "beacon active", "sos", "s o s"]
+phrases = ["distress beacon", "distress beacon active", "beacon active", "sos", "s o s", "automated distress beacon active", "automated distress beacon", "automated distress become active"]
 
 [[codes]]
 code = "B02"
 label = "Beacon acknowledged"
-phrases = ["beacon acknowledged", "beacon received"]
+phrases = ["beacon acknowledged", "beacon received", "beacon and knowledge"]
 
 [[codes]]
 code = "B03"
 label = "Cancel beacon - I am OK"
-phrases = ["cancel beacon", "i am ok", "i am okay", "we are ok", "we are okay"]
+phrases = ["cancel beacon", "i am ok", "i am okay", "we are ok", "we are okay", "cancel because i am okay", "cancel because i am ok"]
 
 # Events that exclude each other in one report. Any two codes of one group
 # together make the report contradictory.
