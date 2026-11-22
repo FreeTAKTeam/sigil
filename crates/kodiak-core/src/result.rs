@@ -5,11 +5,17 @@
 //! matches the documented shape exactly:
 //!
 //! ```json
-//! {"schema":"kodiak.result.v1","type":"chat","content":"We need more food at the camp."}
-//! {"schema":"kodiak.result.v1","type":"intent","category":"mecp","intent":"mecp.report",
-//!  "data":{"severity":1,"code":"S02","content":"MECP/1/S02"},
-//!  "transcript":"Kodiak. Urgent. Need Food.","classifier":"deterministic/1"}
+//! {"schema":"kodiak.result.v2","type":"chat","content":"We need more food at the camp."}
+//! {"schema":"kodiak.result.v2","type":"intent","category":"mecp","intent":"mecp.report",
+//!  "data":{"severity":0,"code":"M01","codes":["M01","M07","S01"],"content":"MECP/0/M01 M07 S01"},
+//!  "transcript":"Kodiak mayday injured, broken leg, need water.","classifier":"deterministic/4",
+//!  "vocabularies":{"contact":"1.2","mecp":"1.2","rch":"1.1"}}
 //! ```
+//!
+//! Version 2 differs from `kodiak.result.v1` only by additions: MECP `codes`
+//! and `parameters`, the rejection reasons `contradictory` and `cancelled`,
+//! and `vocabularies`. Version 1 documents are still read; results are always
+//! written as version 2.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -18,7 +24,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Schema identifier written into every serialized result.
-pub const RESULT_SCHEMA: &str = "kodiak.result.v1";
+pub const RESULT_SCHEMA: &str = "kodiak.result.v2";
+
+/// The previous schema, still accepted when reading.
+pub const RESULT_SCHEMA_V1: &str = "kodiak.result.v1";
 
 /// The outcome of processing one transcript or one audio message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -43,6 +52,8 @@ pub enum KodiakResult {
         /// Calibrated probability of this outcome, only from classifiers
         /// that produce one. Rule-based classifiers leave it empty.
         confidence: Option<f32>,
+        /// Name and version of every vocabulary the classifier used.
+        vocabularies: BTreeMap<String, String>,
     },
     /// The activation word was present but no single valid intent could be
     /// extracted. Callers must not act on a rejection.
@@ -59,6 +70,8 @@ pub enum KodiakResult {
         /// Calibrated probability of this outcome, only from classifiers
         /// that produce one. Rule-based classifiers leave it empty.
         confidence: Option<f32>,
+        /// Name and version of every vocabulary the classifier used.
+        vocabularies: BTreeMap<String, String>,
     },
 }
 
@@ -145,16 +158,65 @@ impl Intent {
     }
 }
 
-/// An MECP report in canonical form.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// An MECP report in canonical form. Build one with
+/// [`MecpReport::encode`] so `content` always matches the other fields.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MecpReport {
     /// Severity level from the MECP vocabulary (0 is most severe).
     pub severity: u8,
-    /// Canonical MECP code, for example `S02`.
+    /// The first event code, for example `S02`. Kept for
+    /// `kodiak.result.v1` consumers; `codes` lists all of them.
     pub code: String,
+    /// Every event code, in the order the operator reported them.
+    #[serde(default)]
+    pub codes: Vec<String>,
     /// Canonical MECP message text, for example `MECP/1/S02`.
     pub content: String,
+    /// Structured values the operator spoke. Never metadata supplied by the
+    /// calling application, such as the radio's own position.
+    #[serde(default, skip_serializing_if = "MecpParameters::is_empty")]
+    pub parameters: MecpParameters,
+}
+
+/// Structured MECP values, each present only when spoken by the operator.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MecpParameters {
+    /// Number of people (`<n>pax`), 1-9999.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pax: Option<u16>,
+    /// Spoken coordinates (`<lat>,<lon>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinates: Option<Coordinates>,
+    /// References (`#<ref>`), without the `#`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<String>,
+    /// ETA or duration in minutes (bare number, with R03).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_minutes: Option<u16>,
+    /// Language hint (`@<code>`), ISO 639 lower case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Event time (`@<hhmm>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    /// Callsign (`~<callsign>`), without the `~`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callsign: Option<String>,
+    /// Free descriptive text, as transcribed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// A latitude and longitude in decimal degrees.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Coordinates {
+    /// Latitude, -90 to 90.
+    pub latitude: f64,
+    /// Longitude, -180 to 180.
+    pub longitude: f64,
 }
 
 /// Contact affiliation.
@@ -236,6 +298,11 @@ pub enum RejectReason {
     InvalidParameter,
     /// The command was recognized but the target system does not provide it.
     UnsupportedCommand,
+    /// The command gives two different values for one thing, or reports
+    /// events that exclude each other.
+    Contradictory,
+    /// The command is negated or cancelled ("don't", "cancel", "not").
+    Cancelled,
 }
 
 /// A structured rejection of an activated command.
@@ -299,6 +366,8 @@ struct Wire {
     corrections: Vec<Correction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     confidence: Option<f32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    vocabularies: BTreeMap<String, String>,
 }
 
 impl Wire {
@@ -316,6 +385,7 @@ impl Wire {
             classifier: None,
             corrections: Vec::new(),
             confidence: None,
+            vocabularies: BTreeMap::new(),
         }
     }
 }
@@ -333,6 +403,7 @@ impl From<KodiakResult> for Wire {
                 classifier,
                 corrections,
                 confidence,
+                vocabularies,
             } => {
                 let category = intent.category();
                 let name = intent.name().to_owned();
@@ -351,6 +422,7 @@ impl From<KodiakResult> for Wire {
                     classifier: Some(classifier),
                     corrections,
                     confidence,
+                    vocabularies,
                     ..Self::empty(Kind::Intent)
                 }
             }
@@ -360,6 +432,7 @@ impl From<KodiakResult> for Wire {
                 classifier,
                 corrections,
                 confidence,
+                vocabularies,
             } => Self {
                 category: rejection.category,
                 reason: Some(rejection.reason),
@@ -368,13 +441,14 @@ impl From<KodiakResult> for Wire {
                 classifier: Some(classifier),
                 corrections,
                 confidence,
+                vocabularies,
                 ..Self::empty(Kind::Rejected)
             },
         }
     }
 }
 
-/// Error for a JSON document that is not a valid `kodiak.result.v1`.
+/// Error for a JSON document that is not a valid Kodiak result.
 #[derive(Debug)]
 pub struct ContractError(String);
 
@@ -394,7 +468,7 @@ impl TryFrom<Wire> for KodiakResult {
     type Error = ContractError;
 
     fn try_from(wire: Wire) -> Result<Self, ContractError> {
-        if wire.schema != RESULT_SCHEMA {
+        if wire.schema != RESULT_SCHEMA && wire.schema != RESULT_SCHEMA_V1 {
             return Err(ContractError(format!(
                 "unsupported schema {:?}",
                 wire.schema
@@ -411,7 +485,16 @@ impl TryFrom<Wire> for KodiakResult {
                 let data = require(wire.data, "data")?;
                 let intent = match name.as_str() {
                     MECP_REPORT => {
-                        Intent::MecpReport(serde_json::from_value(data).map_err(invalid)?)
+                        let mut report: MecpReport =
+                            serde_json::from_value(data).map_err(invalid)?;
+                        // Version 1 reports carry one code and no list.
+                        if report.codes.is_empty() {
+                            report.codes.push(report.code.clone());
+                        }
+                        if report.codes.first() != Some(&report.code) {
+                            return Err(ContractError("code is not the first of codes".into()));
+                        }
+                        Intent::MecpReport(report)
                     }
                     CONTACT_REPORT => {
                         Intent::ContactReport(serde_json::from_value(data).map_err(invalid)?)
@@ -433,6 +516,7 @@ impl TryFrom<Wire> for KodiakResult {
                     classifier: require(wire.classifier, "classifier")?,
                     corrections: wire.corrections,
                     confidence: wire.confidence,
+                    vocabularies: wire.vocabularies,
                 }
             }
             Kind::Rejected => Self::Rejected {
@@ -445,6 +529,7 @@ impl TryFrom<Wire> for KodiakResult {
                 classifier: require(wire.classifier, "classifier")?,
                 corrections: wire.corrections,
                 confidence: wire.confidence,
+                vocabularies: wire.vocabularies,
             },
         })
     }
@@ -480,6 +565,7 @@ mod tests {
             classifier: "test/1".into(),
             corrections: Vec::new(),
             confidence: Some(0.5),
+            vocabularies: BTreeMap::new(),
         };
         let value = serde_json::to_value(&contact).unwrap();
         assert_eq!(value["category"], "marker");
@@ -500,6 +586,7 @@ mod tests {
                 read_as: "list".into(),
             }],
             confidence: None,
+            vocabularies: [("rch".to_owned(), "1.1".to_owned())].into(),
         };
         assert_eq!(serde_json::to_value(&users).unwrap()["data"], json!({}));
         assert_eq!(
@@ -532,5 +619,70 @@ mod tests {
         assert!(serde_json::from_value::<KodiakResult>(wrong).is_err());
         let future = json!({"schema": "kodiak.result.v9", "type": "chat", "content": "x"});
         assert!(serde_json::from_value::<KodiakResult>(future).is_err());
+    }
+
+    #[test]
+    fn version_1_documents_are_read_as_version_2() {
+        let v1 = json!({"schema": RESULT_SCHEMA_V1, "type": "intent", "category": "mecp", "intent": "mecp.report",
+            "data": {"severity": 1, "code": "S02", "content": "MECP/1/S02"}, "transcript": "x", "classifier": "c"});
+        let result: KodiakResult = serde_json::from_value(v1).unwrap();
+        let KodiakResult::Intent {
+            intent: Intent::MecpReport(report),
+            ..
+        } = &result
+        else {
+            panic!("{result:?}");
+        };
+        assert_eq!(report, &MecpReport::single(1, "S02").unwrap());
+        let written = serde_json::to_value(&result).unwrap();
+        assert_eq!(written["schema"], RESULT_SCHEMA);
+        assert_eq!(written["data"]["codes"], json!(["S02"]));
+    }
+
+    #[test]
+    fn multi_code_reports_and_new_reasons_round_trip() {
+        let report = MecpReport::encode(
+            0,
+            vec!["M01".into(), "M07".into(), "S01".into()],
+            MecpParameters {
+                pax: Some(3),
+                ..MecpParameters::default()
+            },
+        )
+        .unwrap();
+        let result = KodiakResult::Intent {
+            intent: Intent::MecpReport(report),
+            transcript: "Kodiak mayday injured, broken leg, need water, three people.".into(),
+            classifier: "test/1".into(),
+            corrections: Vec::new(),
+            confidence: None,
+            vocabularies: [("mecp".to_owned(), "1.2".to_owned())].into(),
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            value["data"],
+            json!({"severity": 0, "code": "M01", "codes": ["M01", "M07", "S01"],
+                "content": "MECP/0/M01 M07 S01 3pax", "parameters": {"pax": 3}})
+        );
+        assert_eq!(value["vocabularies"], json!({"mecp": "1.2"}));
+        assert_eq!(
+            serde_json::from_value::<KodiakResult>(value).unwrap(),
+            result
+        );
+        for reason in [RejectReason::Contradictory, RejectReason::Cancelled] {
+            let rejected = KodiakResult::Rejected {
+                rejection: Rejection::new(reason, Some(Category::Marker), "x"),
+                transcript: "t".into(),
+                classifier: "c".into(),
+                corrections: Vec::new(),
+                confidence: None,
+                vocabularies: BTreeMap::new(),
+            };
+            let text = serde_json::to_string(&rejected).unwrap();
+            assert_eq!(
+                serde_json::from_str::<KodiakResult>(&text).unwrap(),
+                rejected
+            );
+        }
     }
 }

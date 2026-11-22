@@ -70,7 +70,7 @@ fn substitution(a: char, b: char) -> u32 {
 }
 
 /// Weighted Levenshtein distance in half units.
-fn distance(heard: &str, word: &str) -> u32 {
+pub fn distance(heard: &str, word: &str) -> u32 {
     let heard: Vec<char> = heard.chars().collect();
     let word: Vec<char> = word.chars().collect();
     let mut previous: Vec<u32> = (0..=word.len())
@@ -129,12 +129,13 @@ pub struct Corrector {
 }
 
 impl Corrector {
-    pub fn new(mut known: BTreeSet<String>) -> Self {
+    /// Corrects unknown words to `known` words, never to one in `excluded`.
+    pub fn new(mut known: BTreeSet<String>, excluded: &BTreeSet<String>) -> Self {
         known.extend(PROTECTED.iter().map(|word| (*word).to_owned()));
         let candidates = known
             .iter()
             .filter(|word| word.chars().count() >= 3 && word.chars().all(char::is_alphabetic))
-            .filter(|word| !PROTECTED.contains(&word.as_str()))
+            .filter(|word| !PROTECTED.contains(&word.as_str()) && !excluded.contains(*word))
             .cloned()
             .collect();
         Self { known, candidates }
@@ -166,12 +167,45 @@ impl Corrector {
         (cost <= limit(length) && cost < second).then_some(word)
     }
 
+    /// Drops false starts: an unknown fragment of at most three letters
+    /// directly before a longer word that begins with it ("stranded st
+    /// stuck"). Each is reported as a correction to the word it started.
+    pub fn drop_false_starts(&self, tokens: &[Token]) -> (Vec<Token>, Vec<Correction>) {
+        let mut corrections = Vec::new();
+        let mut kept: Vec<Token> = Vec::with_capacity(tokens.len());
+        for (index, token) in tokens.iter().enumerate() {
+            let word = token.word.as_str();
+            let length = word.chars().count();
+            let false_start = (1..=3).contains(&length)
+                && word.chars().all(char::is_alphabetic)
+                && !self.known.contains(word)
+                && tokens.get(index + 1).is_some_and(|next| {
+                    next.word.chars().count() > length && next.word.starts_with(word)
+                });
+            if false_start {
+                corrections.push(Correction {
+                    heard: format!("{} {}", token.original, tokens[index + 1].original),
+                    read_as: tokens[index + 1].word.clone(),
+                });
+            } else {
+                kept.push(token.clone());
+            }
+        }
+        (kept, corrections)
+    }
+
     /// Replaces unknown words with their unambiguous vocabulary match.
-    pub fn correct(&self, tokens: Vec<Token>) -> (Vec<Token>, Vec<Correction>) {
+    /// Tokens marked in `verbatim` (free text, callsign and reference
+    /// values) keep their transcribed spelling.
+    pub fn correct(&self, tokens: Vec<Token>, verbatim: &[bool]) -> (Vec<Token>, Vec<Correction>) {
         let mut corrections = Vec::new();
         let tokens = tokens
             .into_iter()
-            .map(|mut token| {
+            .enumerate()
+            .map(|(index, mut token)| {
+                if verbatim.get(index).copied().unwrap_or(false) {
+                    return token;
+                }
                 if let Some(word) = self.closest(&token.word) {
                     corrections.push(Correction {
                         heard: token.word.clone(),
@@ -198,11 +232,12 @@ mod tests {
             ]
             .map(String::from)
             .into(),
+            &BTreeSet::new(),
         )
     }
 
     fn read(text: &str) -> (Vec<String>, Vec<Correction>) {
-        let (tokens, corrections) = corrector().correct(tokenize(text));
+        let (tokens, corrections) = corrector().correct(tokenize(text), &[]);
         (tokens.into_iter().map(|t| t.word).collect(), corrections)
     }
 

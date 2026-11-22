@@ -40,8 +40,8 @@ use kodiak_core::{
     Addressed, Category, Classification, Intent, IntentClassifier, MecpReport, RchCommand,
     RejectReason, Rejection,
 };
-use kodiak_intent::{DeterministicClassifier, first_word_wake};
 use kodiak_intent::vocabulary::{MECP_V1, Mecp, RCH_V1, Rch};
+use kodiak_intent::{DeterministicClassifier, first_word_wake};
 use serde_json::{Value, json};
 
 pub use questions::{
@@ -344,7 +344,11 @@ impl<O: Oracle> LayaClassifier<O> {
     fn read(&self, command: &str, baseline: &Classification) -> Result<Classification, String> {
         let words = words(command);
         let Some(first) = words.first() else {
-            return Ok(rejected(RejectReason::NoIntent, None, "nothing after Kodiak"));
+            return Ok(rejected(
+                RejectReason::NoIntent,
+                None,
+                "nothing after Kodiak",
+            ));
         };
         // In hybrid mode laya may read a word the vocabularies do not know
         // as a severity, but not reinterpret a known one: it read
@@ -371,11 +375,7 @@ impl<O: Oracle> LayaClassifier<O> {
     }
 
     /// Step 3b: an MECP report led by a severity word.
-    fn read_mecp(
-        &self,
-        words: &[&str],
-        severity: &SeverityRead,
-    ) -> Result<Classification, String> {
+    fn read_mecp(&self, words: &[&str], severity: &SeverityRead) -> Result<Classification, String> {
         let level = severity.level;
         let report = words.get(severity.words..).unwrap_or_default().join(" ");
         let label = self.questions.severity_label(level).unwrap_or("routine");
@@ -406,7 +406,8 @@ impl<O: Oracle> LayaClassifier<O> {
                 "no MECP event after the severity",
             ));
         }
-        let Some((code, p_code)) = self.best(&json!({ REPORT: report }), &self.questions.codes())?
+        let Some((code, p_code)) =
+            self.best(&json!({ REPORT: report }), &self.questions.codes())?
         else {
             return Ok(rejected(
                 RejectReason::MissingParameter,
@@ -438,11 +439,15 @@ impl<O: Oracle> LayaClassifier<O> {
             });
         }
         Ok(Classification {
-            result: Ok(Intent::MecpReport(MecpReport {
-                severity: level,
-                content: format!("MECP/{level}/{code}"),
-                code,
-            })),
+            result: MecpReport::single(level, code)
+                .map(Intent::MecpReport)
+                .map_err(|error| {
+                    Rejection::new(
+                        RejectReason::InvalidParameter,
+                        Some(Category::Mecp),
+                        error.0,
+                    )
+                }),
             corrections: Vec::new(),
             confidence,
         })
@@ -454,8 +459,10 @@ impl<O: Oracle> LayaClassifier<O> {
         command: &str,
         baseline: &Classification,
     ) -> Result<Classification, String> {
-        let Some((intent, p)) =
-            self.best(&json!({ COMMAND: command.trim() }), &self.questions.commands())?
+        let Some((intent, p)) = self.best(
+            &json!({ COMMAND: command.trim() }),
+            &self.questions.commands(),
+        )?
         else {
             return Ok(rejected(
                 RejectReason::NoIntent,
@@ -513,12 +520,13 @@ impl<O: Oracle> LayaClassifier<O> {
                     _ => baseline,
                 }
             }
-            Mode::LayaOnly => self.read(command, &baseline).unwrap_or_else(|error| {
-                Classification {
-                    corrections: baseline.corrections,
-                    ..rejected(RejectReason::NoIntent, None, error)
-                }
-            }),
+            Mode::LayaOnly => {
+                self.read(command, &baseline)
+                    .unwrap_or_else(|error| Classification {
+                        corrections: baseline.corrections,
+                        ..rejected(RejectReason::NoIntent, None, error)
+                    })
+            }
         }
     }
 }
@@ -565,6 +573,10 @@ fn words(text: &str) -> Vec<&str> {
 impl<O: Oracle> IntentClassifier for LayaClassifier<O> {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn vocabularies(&self) -> std::collections::BTreeMap<String, String> {
+        self.baseline.vocabularies()
     }
 
     fn classify(&self, command: &str) -> Classification {

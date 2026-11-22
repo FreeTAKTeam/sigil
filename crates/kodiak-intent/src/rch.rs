@@ -38,6 +38,11 @@ impl Parser {
         }
     }
 
+    /// `version.revision` of the vocabulary.
+    pub fn release(&self) -> String {
+        self.vocabulary.release()
+    }
+
     /// Returns `None` when the words are not an RCH command.
     pub fn parse(&self, tokens: &[Token]) -> Option<Result<Intent, Rejection>> {
         let tokens: Vec<&Token> = tokens

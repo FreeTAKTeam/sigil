@@ -1,4 +1,4 @@
-# Kodiak MECP voice vocabulary, version 1.
+# Kodiak MECP voice vocabulary, version 1, revision 6.
 #
 # Codes, labels and severities follow the canonical MECP tables:
 #   REM  apps/mobile/src/utils/mecp.ts               (commit 3e1e172)
@@ -8,24 +8,104 @@
 # unknown code, so it is not offered by voice.
 #
 # Phrases are lower-case word sequences. Punctuation and apostrophes split
-# words ("can't" is "can t"). When phrases overlap, the longest match wins;
-# two different codes in one command are rejected as ambiguous.
+# words ("can't" is "can t"). When phrases overlap, the longest match wins.
+# Several events may be reported at once ("injured, broken leg, need water"
+# is M01 M07 S01, in the order spoken). A report is rejected when two event
+# phrases cross each other ("need water rescue": S01 or T11?), when it
+# names events listed together under [[conflicts]], or when a negation is
+# left over after the event phrases are matched.
+#
+# Revision 2 (22 November 2026): multiple event codes, structured parameters
+# ([parameters], [languages]), negations and conflicts.
 
 schema = "kodiak.vocabulary.mecp"
 version = 1
+revision = 6
 
 # Words that may surround an MECP report without changing its meaning.
 fillers = ["we", "i", "a", "an", "the", "is", "are", "am", "please", "more", "some",
   "now", "here", "there", "at", "our", "my", "location", "report", "mecp", "event",
   "has", "have", "got", "been", "it", "and", "very", "badly", "need", "needed", "requires",
-  "someone", "for", "in", "needs"]
+  "someone", "for", "in", "needs", "also", "plus", "with"]
+
+# Words that negate or cancel the report when no event phrase uses them.
+# "not breathing", "no water" and "cancel beacon" are events, so they stay
+# valid; "mayday don't need water" is rejected as cancelled.
+negations = ["not", "no", "never", "don", "dont", "doesn", "didn", "isn", "aren",
+  "wasn", "won", "cannot", "cancel", "cancelled", "canceled", "without", "nothing",
+  "none", "stop", "ignore", "negative", "belay", "scratch"]
+
+# Structured values (MECP extras). Every value must be spoken; Kodiak never
+# fills one in from metadata. Keyword values take at most `max_value_words`
+# words and stop at the first filler, keyword, negation or event word.
+[parameters]
+# "<number> <unit>": a person count, encoded as <n>pax. H07 also accepts a
+# bare number ("space for five").
+pax_units = ["people", "persons", "person", "pax"]
+# ETA or duration after R03, as units in minutes. A bare number is minutes.
+eta_units = { minute = 1, minutes = 1, min = 1, mins = 1, hour = 60, hours = 60, hr = 60, hrs = 60 }
+# "callsign bravo six" -> ~BRAVO-6. "cosign" and "cold sign" are how
+# Parakeet wrote "callsign" on live NFM audio (22 November 2026); "con sign"
+# from an Italian speaker the same day.
+callsign_words = ["callsign", "call sign", "cosign", "cold sign", "con sign"]
+# "reference alpha one" -> #ALPHA-1
+reference_words = ["reference", "ref", "incident number", "ticket"]
+# "time fourteen thirty", "time 1430 hours", "1430 zulu" -> @1430
+timestamp_words = ["time", "timestamp", "time of event"]
+# Words that may follow a time. Only these mark a time without a keyword.
+timestamp_suffixes = ["zulu", "local"]
+# Optional after a keyworded time.
+timestamp_trailing = ["hours", "hrs", "zulu", "local"]
+# "language french" -> @fr
+language_words = ["language", "speaks", "speaking"]
+# "details north gate behind the barn": every word after it, as transcribed.
+text_words = ["details", "note", "notes", "remarks", "description"]
+# Coordinates are a pair of decimal numbers ("45.5017, -73.5673", "forty five
+# point five minus seventy three point five"); "minus" makes the next negative.
+minus_words = ["minus"]
+coordinate_separators = ["comma", "by"]
+max_value_words = 3
+# Words a callsign or reference may contain besides numbers: the phonetic
+# alphabet. Any other word rejects the report, so a misheard letter ("Revo"
+# for "Bravo") is never sent as part of a callsign. Empty allows any word.
+identifier_words = ["alpha", "alfa", "bravo", "charlie", "delta", "echo", "foxtrot",
+  "golf", "hotel", "india", "juliet", "juliett", "kilo", "lima", "mike", "november",
+  "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform", "victor",
+  "whiskey", "whisky", "xray", "yankee", "zulu"]
+
+# Spoken language name -> ISO 639-1 code.
+[languages]
+english = "en"
+french = "fr"
+spanish = "es"
+german = "de"
+italian = "it"
+portuguese = "pt"
+dutch = "nl"
+arabic = "ar"
+russian = "ru"
+ukrainian = "uk"
+polish = "pl"
+chinese = "zh"
+mandarin = "zh"
+japanese = "ja"
+korean = "ko"
+hindi = "hi"
+turkish = "tr"
+greek = "el"
+hebrew = "he"
+persian = "fa"
+farsi = "fa"
+swahili = "sw"
 
 [[severities]]
 level = 0
 label = "Mayday"
 # Parakeet transcribed a spoken "mayday" over live NFM as "May Day" and, from
 # the saved WAV of the same transmission, as "may they".
-words = ["mayday", "may day", "may they"]
+# On 22 November 2026 Corvo's "mayday" was heard as "made a" twice, and an
+# Italian speaker's (voice notes) as "Medei" and "may die".
+words = ["mayday", "may day", "may they", "made a", "medei", "may die"]
 
 [[severities]]
 level = 1
@@ -47,7 +127,7 @@ words = ["routine", "normal"]
 [[codes]]
 code = "M01"
 label = "Injury"
-phrases = ["injury", "injured", "someone injured", "person injured", "hurt", "someone hurt"]
+phrases = ["injury", "injured", "injure", "someone injured", "person injured", "hurt", "someone hurt"]
 
 [[codes]]
 code = "M02"
@@ -87,7 +167,7 @@ phrases = ["burns", "burn", "burned", "burnt"]
 [[codes]]
 code = "M09"
 label = "Multiple casualties"
-phrases = ["multiple casualties", "mass casualty", "mass casualties", "several casualties", "casualties"]
+phrases = ["multiple casualties", "mass casualty", "mass casualties", "several casualties", "casualties", "multiple causality", "multiple causalities"]
 
 [[codes]]
 code = "M10"
@@ -117,23 +197,23 @@ phrases = ["persons located alive", "person located alive", "located alive", "fo
 [[codes]]
 code = "M15"
 label = "Area searched, no victims found"
-phrases = ["area searched", "no victims", "no victims found", "area searched no victims", "area searched no victims found"]
+phrases = ["area searched", "no victims", "no victims found", "area searched no victims", "area searched no victims found", "area search", "no victim found"]
 
 # Terrain / Infrastructure
 [[codes]]
 code = "T01"
 label = "Road blocked"
-phrases = ["road blocked", "road block", "roadblock", "blocked road"]
+phrases = ["road blocked", "road block", "roadblock", "roadblocked", "blocked road"]
 
 [[codes]]
 code = "T02"
 label = "Bridge out"
-phrases = ["bridge out", "bridge down", "bridge collapsed", "bridge washed out"]
+phrases = ["bridge out", "bridge down", "bridge collapsed", "bridge washed out", "breach out", "preach out"]
 
 [[codes]]
 code = "T03"
 label = "Building collapsed"
-phrases = ["building collapsed", "building collapse", "collapsed building", "structure collapse"]
+phrases = ["building collapsed", "building collapse", "collapsed building", "structure collapse", "building collapses"]
 
 [[codes]]
 code = "T04"
@@ -163,7 +243,7 @@ phrases = ["avalanche"]
 [[codes]]
 code = "T09"
 label = "Path impassable"
-phrases = ["path impassable", "trail impassable", "impassable", "path blocked", "trail blocked"]
+phrases = ["path impassable", "trail impassable", "impassable", "path blocked", "trail blocked", "path impossible", "part impossible", "pass impossible", "pass impassable"]
 
 [[codes]]
 code = "T10"
@@ -286,7 +366,9 @@ phrases = ["sheltering in place", "shelter in place", "sheltering"]
 [[codes]]
 code = "P04"
 label = "En route to"
-phrases = ["en route", "enroute", "on route", "on the way", "on our way"]
+# "un route two": Corvo's "en route to" on 22 November 2026.
+phrases = ["en route", "enroute", "on route", "on the way", "on our way", "en route to", "on route to",
+  "un route", "un route to", "en route two", "un route two"]
 
 [[codes]]
 code = "P05"
@@ -598,3 +680,62 @@ phrases = ["beacon acknowledged", "beacon received"]
 code = "B03"
 label = "Cancel beacon - I am OK"
 phrases = ["cancel beacon", "i am ok", "i am okay", "we are ok", "we are okay"]
+
+# Events that exclude each other in one report. Any two codes of one group
+# together make the report contradictory.
+
+[[conflicts]]
+codes = ["S01", "H01"]
+reason = "needs water and has water available"
+
+[[conflicts]]
+codes = ["S02", "H02"]
+reason = "needs food and has food available"
+
+[[conflicts]]
+codes = ["S03", "H03"]
+reason = "needs medication and has medical supplies"
+
+[[conflicts]]
+codes = ["S04", "H04"]
+reason = "needs power and has power available"
+
+[[conflicts]]
+codes = ["S05", "H05"]
+reason = "needs fuel and has fuel"
+
+[[conflicts]]
+codes = ["S06", "H06"]
+reason = "needs tools and has tools"
+
+[[conflicts]]
+codes = ["C02", "H08"]
+reason = "needs transport and has transport"
+
+[[conflicts]]
+codes = ["D01", "D03"]
+reason = "drill and end of drill"
+
+[[conflicts]]
+codes = ["B01", "B03"]
+reason = "beacon active and beacon cancelled"
+
+[[conflicts]]
+codes = ["M14", "M15"]
+reason = "persons located alive and no victims found"
+
+[[conflicts]]
+codes = ["P02", "P03"]
+reason = "evacuating and sheltering in place"
+
+[[conflicts]]
+codes = ["R02", "R04"]
+reason = "help coming and cannot assist"
+
+[[conflicts]]
+codes = ["R07", "C01", "B01"]
+reason = "all clear together with a request for rescue"
+
+[[conflicts]]
+codes = ["B03", "C01"]
+reason = "reports being OK and asks for rescue"

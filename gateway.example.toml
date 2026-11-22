@@ -33,6 +33,9 @@ wake_words = ["kodiak", "kodiac", "codiak", "codiac", "codeiac"]
 # Clock-direction contact reports need a verified compass heading. Enable only
 # if your radios report a compass heading in BSS, not GPS course over ground.
 bss_heading_is_compass = false
+# A contact marker uses the fix from the reporting transmission; without one,
+# it may use the radio's last fix only if it is at most this many seconds old.
+marker_max_fix_age_s = 300
 # Command recognition: "deterministic" (vocabulary rules) or "laya" (a laya
 # typed-decision model checked against the rules; needs a `--features laya`
 # build and about 1.6 GB of RAM). laya also recovers a misheard activation

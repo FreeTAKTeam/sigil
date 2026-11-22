@@ -198,7 +198,7 @@ fn ambiguous_and_invalid_rules_stay_rejected() {
     let out = classify(
         Scripted::new(&[("urgent", 0.99), ("S01", 0.99)]),
         Mode::Hybrid,
-        "urgent food and water",
+        "urgent need water rescue",
     );
     assert_eq!(content(&out), "Ambiguous");
     let out = classify(
@@ -206,7 +206,13 @@ fn ambiguous_and_invalid_rules_stay_rejected() {
         Mode::Hybrid,
         "mayday we don't need water anymore",
     );
-    assert_eq!(content(&out), "InvalidParameter");
+    assert_eq!(content(&out), "Cancelled");
+    let out = classify(
+        Scripted::new(&[("urgent", 0.99), ("S01", 0.99)]),
+        Mode::Hybrid,
+        "urgent need water we have water",
+    );
+    assert_eq!(content(&out), "Contradictory");
 }
 
 #[test]
@@ -261,10 +267,7 @@ fn an_unsure_hub_reading_is_not_a_command() {
 #[test]
 fn a_misheard_first_word_is_kodiak_only_before_a_command() {
     // An unsure laya leaves the rules' first-word check in charge.
-    let engine = Engine::new(classifier(
-        Scripted::new(&[("help", 0.5)]),
-        Mode::Hybrid,
-    ));
+    let engine = Engine::new(classifier(Scripted::new(&[("help", 0.5)]), Mode::Hybrid));
     let out = engine.process_text(&TextInput::new("Kardiac urgent need food."));
     assert_eq!(result(&out), "MECP/1/S02");
     let KodiakResult::Intent { corrections, .. } = out else {

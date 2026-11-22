@@ -18,6 +18,12 @@ pub const EVAL_V1: &str = include_str!("../datasets/eval.v1.jsonl");
 /// expected MECP `content` where there is one, and its `source`.
 pub const LIVE_V1: &str = include_str!("../datasets/live.v1.jsonl");
 
+/// The regression set for `kodiak.result.v2`: one JSON object per line with
+/// `suite` (`mecp`, `ddd`, `chat` or `rch`), `source` (`live` for a
+/// recorded Parakeet v2 INT8 transcript, `constructed` otherwise), `text`,
+/// the expected result fields under `expect`, and an optional `note`.
+pub const REGRESSION_V2: &str = include_str!("../datasets/regression.v2.jsonl");
+
 /// One labelled utterance.
 #[derive(Clone, Debug, Serialize)]
 pub struct Example {
@@ -36,7 +42,7 @@ pub fn label(result: &kodiak_core::KodiakResult) -> String {
         KodiakResult::Intent {
             intent: Intent::MecpReport(report),
             ..
-        } => format!("mecp.report/{}", report.code),
+        } => format!("mecp.report/{}", report.codes.join("+")),
         KodiakResult::Intent { intent, .. } => intent.name().into(),
         KodiakResult::Rejected { rejection, .. } => match rejection.reason {
             RejectReason::NoIntent => "no_intent",
@@ -44,6 +50,8 @@ pub fn label(result: &kodiak_core::KodiakResult) -> String {
             RejectReason::MissingParameter => "rejected/missing_parameter",
             RejectReason::InvalidParameter => "rejected/invalid_parameter",
             RejectReason::UnsupportedCommand => "rejected/unsupported_command",
+            RejectReason::Contradictory => "rejected/contradictory",
+            RejectReason::Cancelled => "rejected/cancelled",
         }
         .into(),
     }
