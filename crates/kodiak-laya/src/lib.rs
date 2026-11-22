@@ -313,31 +313,39 @@ impl<O: Oracle> LayaClassifier<O> {
             .map(|(label, p, _)| (label, p)))
     }
 
-    /// Step 3b: is the first word a severity? Probabilities of spoken forms
-    /// of the same level are summed ("mayday" and "may").
+    /// Step 3b: is the first word a severity? Within one question, the
+    /// probabilities of spoken forms of the same level are summed ("mayday"
+    /// and "may"). When the spoken forms are asked in several chunks, the
+    /// best level across chunks wins, as for chunked event questions.
     fn severity(&self, word: &str) -> Result<Option<SeverityRead>, String> {
         let replies = self
             .oracle
             .ask(&json!({ WORD: word }), &self.questions.severity())?;
-        let Some(reply) = replies.first() else {
+        if replies.is_empty() {
             return Err("laya returned no severity".into());
-        };
-        let mut levels: BTreeMap<u8, (f32, f32, usize)> = BTreeMap::new();
-        for (label, p) in &reply.probabilities {
-            if let Some(spoken) = self.questions.severity_word(label) {
-                let entry = levels.entry(spoken.level).or_insert((0.0, 0.0, 1));
-                entry.0 += p;
-                if *p > entry.1 {
-                    entry.1 = *p;
-                    entry.2 = spoken.words;
+        }
+        let mut best: Option<(u8, f32, usize, &Reply)> = None;
+        for reply in &replies {
+            let mut levels: BTreeMap<u8, (f32, f32, usize)> = BTreeMap::new();
+            for (label, p) in &reply.probabilities {
+                if let Some(spoken) = self.questions.severity_word(label) {
+                    let entry = levels.entry(spoken.level).or_insert((0.0, 0.0, 1));
+                    entry.0 += p;
+                    if *p > entry.1 {
+                        entry.1 = *p;
+                        entry.2 = spoken.words;
+                    }
+                }
+            }
+            for (level, (p, _, words)) in levels {
+                if best.is_none_or(|(_, top, _, _)| p > top) {
+                    best = Some((level, p, words, reply));
                 }
             }
         }
-        Ok(levels
-            .into_iter()
-            .max_by(|a, b| a.1.0.total_cmp(&b.1.0))
-            .filter(|(_, (p, _, _))| self.sure(reply, *p))
-            .map(|(level, (p, _, words))| SeverityRead { level, p, words }))
+        Ok(best
+            .filter(|(_, p, _, reply)| self.sure(reply, *p))
+            .map(|(level, p, words, _)| SeverityRead { level, p, words }))
     }
 
     /// The flow of step 3 with laya picking the labels.
