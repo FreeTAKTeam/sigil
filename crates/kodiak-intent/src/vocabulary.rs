@@ -650,7 +650,7 @@ mod tests {
         // 12 categories, 108 codes: the RCH table (B04 is REM-only).
         assert_eq!(mecp.codes.len(), 108);
         assert_eq!(mecp.severities.len(), 4);
-        assert_eq!(mecp.release(), "1.3");
+        assert_eq!(mecp.release(), "1.5");
         assert_eq!(Contact::parse(CONTACT_V1).unwrap().release(), "1.2");
         assert_eq!(Rch::parse(RCH_V1).unwrap().release(), "1.1");
     }
@@ -663,8 +663,8 @@ mod tests {
     #[test]
     fn inconsistent_vocabularies_are_refused() {
         // Unknown field: schema validation.
-        assert!(mecp_with("revision = 3", "revision = 3\nsurprise = 1").is_err());
-        assert!(mecp_with("revision = 3", "revision = 0").is_err());
+        assert!(mecp_with("revision = 5", "revision = 5\nsurprise = 1").is_err());
+        assert!(mecp_with("revision = 5", "revision = 0").is_err());
         // A phrase claimed by two codes.
         assert!(mecp_with(r#""injury", "#, r#""injury", "fuel", "#).is_err());
         // The same alias twice in one list.

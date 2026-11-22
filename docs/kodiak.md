@@ -34,7 +34,7 @@ The API is synchronous. Recognition and classification are CPU-bound and Sigil r
 
 ## Result contract `kodiak.result.v2`
 
-Every result carries `"schema": "kodiak.result.v2"` and a `type`. Intents and rejections also record the classifier and the version of each vocabulary it used (`"vocabularies":{"contact":"1.2","mecp":"1.3","rch":"1.1"}`, omitted below).
+Every result carries `"schema": "kodiak.result.v2"` and a `type`. Intents and rejections also record the classifier and the version of each vocabulary it used (`"vocabularies":{"contact":"1.2","mecp":"1.5","rch":"1.1"}`, omitted below).
 
 ```json
 {"schema":"kodiak.result.v2","type":"chat","content":"We need more food at the camp."}
@@ -74,10 +74,10 @@ Every result carries `"schema": "kodiak.result.v2"` and a `type`. Intents and re
 
 The vocabulary files are in `crates/kodiak-intent/vocabularies/`, embedded at compile time and validated when loaded. Each file has a schema `version` and a content `revision`; results record them as `version.revision`. Loading fails on an unknown field, a phrase claimed by two codes, an alias repeated in one list, a word with two roles (for example a filler that is also a negation), a parameter keyword or language name that is also an event phrase, a conflict naming an unknown code, or an alias that is not lower case.
 
-- **MECP (`mecp/v1.toml`, revision 3).**
+- **MECP (`mecp/v1.toml`, revision 5).**
   - Contains the 4 severities and all 108 event codes shared by REM (`apps/mobile/src/utils/mecp.ts`) and RCH (`crates/r3akt-profile-rch/src/lib.rs`).
   - Kodiak adds only spoken phrases; it doesn't redefine any code.
-  - A report needs exactly one severity word (mayday, urgent, safety, routine) and one or more events. Spoken variants heard on the radio are also accepted: "may day" and "may they" for mayday, "normal" for routine.
+  - A report needs exactly one severity word (mayday, urgent, safety, routine) and one or more events. Spoken variants heard on the radio are also accepted: "may day", "may they" and "made a" for mayday, "normal" for routine.
   - **Several events:** "mayday injured, broken leg, need water" is `MECP/0/M01 M07 S01`, in spoken order; a repeated event is sent once. The report is rejected as `ambiguous` when two event phrases cross ("need water rescue": S01 or T11), and as `contradictory` when it names events listed together under `[[conflicts]]` (need water and have water, all clear and send rescue, and so on) or two severities.
   - **Structured values** (`[parameters]`, `[languages]`), encoded in the canonical MECP order `codes pax lat,lon #ref eta @lang @hhmm ~callsign text`:
     - person count: "four people", "5 pax" → `4pax`; H07 also takes a bare number ("space for five");
@@ -112,8 +112,9 @@ Live NFM tests showed that the recognizer spells the same spoken command differe
 4. **Second chance for leftover MECP words.** A known word that no MECP phrase used may be read as an MECP filler word if it clearly sounds like one. "meet" (from the phrase "meet at") becomes "need". Fillers carry no meaning, so this can only drop a misheard word; it can never add an action.
 5. **Protected words.** Negations and cancellations (`not`, `no`, `never`, `don`, `cannot`, `cancel`, `stop`, `ignore` and others) are never corrected and never used as targets. "Kodiak mayday we don't need water anymore" is rejected as `cancelled`. Parameter keywords, units and language names are never targets either, so a misheard word cannot start a free-text value.
 6. **No events from corrections.** A corrected word may support a report with one event, but a report with several events is rejected as `ambiguous` if any of them rests on a corrected word. "mayday deed water" would otherwise read "deed" as "dead" and add M10.
-7. **Verbatim values.** Free text (everything after "details") and callsign and reference values are never corrected. "north gate" stays "north gate", and "Bravo Sixth" is not turned into "Bravo sixty".
-8. **Audit trail.** Every replacement is listed in the result's `corrections`, saved in the transcript and gateway events, and logged by Sigil as `Kodiak read "meet" as "need"`.
+7. **False starts.** An unknown fragment of at most three letters directly before a longer word that begins with it is dropped ("stranded, st stuck"). It is reported as a correction to the word it started.
+8. **Verbatim values.** Free text (everything after "details") and callsign and reference values are never corrected. "north gate" stays "north gate", and "Bravo Sixth" is not turned into "Bravo sixty".
+9. **Audit trail.** Every replacement is listed in the result's `corrections`, saved in the transcript and gateway events, and logged by Sigil as `Kodiak read "meet" as "need"`.
 
 Multi-word and plural severity spellings ("may day", "may they", "maydays") are also accepted. Free-text arguments such as a nickname or a library search keep the words as transcribed.
 
@@ -181,7 +182,13 @@ With these rules, 26 of the 32 transcripts give the intended command and the oth
 - **Two distances were wrong:** "two hundred meters" was heard as "twenty meters", and "three hundred metres" as "twenty metres". Both are well-formed numbers, so no parser rule can detect them. The second, a compass-bearing contact, was published to the hub as a 20 m suspect marker. This is a limit of speech recognition and needs an operational answer (confirmation, a minimum distance, or digit-by-digit distances), not a vocabulary change.
 - "Tm" for "three hundred meters" and "Anno Alpha Kilometer" for "unknown, half a kilometer" are recognizer failures and were rejected. This speaker's "half a" was heard as "Alpha" in both Corvo sessions.
 
-The 15 new distinct transcripts are also `live` cases; the two wrong distances are recorded with what the parser returns and a note on what was said. Regression results: MECP 70/70, DDD 38/38, chat 46/46, RCH 7/7.
+The 15 new distinct transcripts are also `live` cases; the two wrong distances are recorded with what the parser returns and a note on what was said.
+
+**MECP poster read-through, Medical and Terrain rows** (Corvo, male speaker, severities cycling mayday to routine): 22 of the 32 codes read were correct, the others were rejected or stayed chat, and no code was wrong. No transmission was heard for T13. MECP vocabulary revision 4 adds the recorded mishearings that are safe as aliases: "made a" (mayday, heard twice), "multiple causality" (M09), "area search" and "no victim found" (M15), "breach out" and "preach out" (T02, heard in two sessions), "building collapses" (T03), and "path impossible", "part impossible", "pass impossible" and "pass impassable" (T09). With them, 30 of the 33 transcripts give the intended code. "disease" for "deceased", "errand" for "event" and "or out" for "power out" are not aliases: the first would turn an illness into a death report, and the others are too generic. 
+
+**Second read-through, Weather, Supplies, Position and Coordination rows** (Corvo): 21 of 27 correct, the others rejected or chat, no wrong code. Weather passed 6 of 6. Revision 5 adds "en route to" and the recorded "un route two" (P04), and the false-start rule fixes "stranded, st stuck" (P01). The remaining failures are recognizer errors that are not safe aliases ("Relatives" for "relay this message", "renderwood, art" for "rendezvous at") or transcripts without the activation word or the severity. Repeated "Fabric dispatched" lines for one message ID are retries: the publisher resends when no delivery proof arrives within 2 s.
+
+Regression results: MECP 127/127, DDD 38/38, chat 49/49, RCH 7/7.
 
 ## Verification (22 November 2026): multi-event MECP and DDD markers
 

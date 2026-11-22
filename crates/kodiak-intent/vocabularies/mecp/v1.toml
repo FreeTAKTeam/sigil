@@ -1,4 +1,4 @@
-# Kodiak MECP voice vocabulary, version 1, revision 3.
+# Kodiak MECP voice vocabulary, version 1, revision 5.
 #
 # Codes, labels and severities follow the canonical MECP tables:
 #   REM  apps/mobile/src/utils/mecp.ts               (commit 3e1e172)
@@ -20,7 +20,7 @@
 
 schema = "kodiak.vocabulary.mecp"
 version = 1
-revision = 3
+revision = 5
 
 # Words that may surround an MECP report without changing its meaning.
 fillers = ["we", "i", "a", "an", "the", "is", "are", "am", "please", "more", "some",
@@ -102,7 +102,8 @@ level = 0
 label = "Mayday"
 # Parakeet transcribed a spoken "mayday" over live NFM as "May Day" and, from
 # the saved WAV of the same transmission, as "may they".
-words = ["mayday", "may day", "may they"]
+# On 22 November 2026 Corvo's "mayday" was heard as "made a" twice.
+words = ["mayday", "may day", "may they", "made a"]
 
 [[severities]]
 level = 1
@@ -164,7 +165,7 @@ phrases = ["burns", "burn", "burned", "burnt"]
 [[codes]]
 code = "M09"
 label = "Multiple casualties"
-phrases = ["multiple casualties", "mass casualty", "mass casualties", "several casualties", "casualties"]
+phrases = ["multiple casualties", "mass casualty", "mass casualties", "several casualties", "casualties", "multiple causality", "multiple causalities"]
 
 [[codes]]
 code = "M10"
@@ -194,7 +195,7 @@ phrases = ["persons located alive", "person located alive", "located alive", "fo
 [[codes]]
 code = "M15"
 label = "Area searched, no victims found"
-phrases = ["area searched", "no victims", "no victims found", "area searched no victims", "area searched no victims found"]
+phrases = ["area searched", "no victims", "no victims found", "area searched no victims", "area searched no victims found", "area search", "no victim found"]
 
 # Terrain / Infrastructure
 [[codes]]
@@ -205,12 +206,12 @@ phrases = ["road blocked", "road block", "roadblock", "roadblocked", "blocked ro
 [[codes]]
 code = "T02"
 label = "Bridge out"
-phrases = ["bridge out", "bridge down", "bridge collapsed", "bridge washed out"]
+phrases = ["bridge out", "bridge down", "bridge collapsed", "bridge washed out", "breach out", "preach out"]
 
 [[codes]]
 code = "T03"
 label = "Building collapsed"
-phrases = ["building collapsed", "building collapse", "collapsed building", "structure collapse"]
+phrases = ["building collapsed", "building collapse", "collapsed building", "structure collapse", "building collapses"]
 
 [[codes]]
 code = "T04"
@@ -240,7 +241,7 @@ phrases = ["avalanche"]
 [[codes]]
 code = "T09"
 label = "Path impassable"
-phrases = ["path impassable", "trail impassable", "impassable", "path blocked", "trail blocked"]
+phrases = ["path impassable", "trail impassable", "impassable", "path blocked", "trail blocked", "path impossible", "part impossible", "pass impossible", "pass impassable"]
 
 [[codes]]
 code = "T10"
@@ -363,7 +364,9 @@ phrases = ["sheltering in place", "shelter in place", "sheltering"]
 [[codes]]
 code = "P04"
 label = "En route to"
-phrases = ["en route", "enroute", "on route", "on the way", "on our way"]
+# "un route two": Corvo's "en route to" on 22 November 2026.
+phrases = ["en route", "enroute", "on route", "on the way", "on our way", "en route to", "on route to",
+  "un route", "un route to", "en route two", "un route two"]
 
 [[codes]]
 code = "P05"

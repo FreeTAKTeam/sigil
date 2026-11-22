@@ -242,9 +242,11 @@ impl IntentClassifier for DeterministicClassifier {
 
     fn classify(&self, command: &str) -> Classification {
         let tokens = self.mecp.join_severities(&tokenize(command));
+        let (tokens, mut corrections) = self.corrector.drop_false_starts(&tokens);
         let words: Vec<&str> = tokens.iter().map(|t| t.word.as_str()).collect();
         let verbatim = self.mecp.verbatim(&words);
-        let (tokens, mut corrections) = self.corrector.correct(tokens, &verbatim);
+        let (tokens, fixed) = self.corrector.correct(tokens, &verbatim);
+        corrections.extend(fixed);
         let result = self.classify_tokens(&tokens, &mut corrections);
         Classification {
             result,
@@ -558,7 +560,7 @@ mod tests {
     #[test]
     fn vocabulary_versions_are_recorded() {
         let versions = DeterministicClassifier::new().vocabularies();
-        assert_eq!(versions["mecp"], "1.3");
+        assert_eq!(versions["mecp"], "1.5");
         assert_eq!(versions["contact"], "1.2");
         assert_eq!(versions["rch"], "1.1");
     }
@@ -653,6 +655,16 @@ mod tests {
             reason("safety road blocked reference offer one"),
             RejectReason::InvalidParameter
         );
+        // A false start before the word it begins is dropped and reported.
+        let result = DeterministicClassifier::new().classify("mayday stranded st stuck");
+        assert_eq!(result.corrections.len(), 1);
+        assert_eq!(result.corrections[0].read_as, "stuck");
+        assert!(matches!(
+            result.result,
+            Ok(Intent::MecpReport(MecpReport { ref content, .. })) if content == "MECP/0/P01"
+        ));
+        assert_eq!(mecp("routine un route two"), "MECP/3/P04");
+        assert_eq!(mecp("routine en route to"), "MECP/3/P04");
         // Free text and identifiers keep their spelling: no corrections.
         let rules = DeterministicClassifier::new();
         let result = rules.classify("safety road blocked reference alpha one details north gate");
