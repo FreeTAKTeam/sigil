@@ -5,11 +5,11 @@
 //!
 //! - Chat is sent as an ordinary LXMF chat message.
 //! - MECP reports become an RCH mission log entry
-//!   (`mission.registry.log_entry.upsert`). Kodiak's report carries only what
-//!   the operator spoke. When the operator spoke no coordinates, Sigil adds
-//!   the radio's own position as the MECP coordinates token; spoken
-//!   coordinates are never replaced. The message must stay within the MECP
-//!   200-byte limit.
+//!   (`mission.registry.log_entry.upsert`) whose content is the MECP message
+//!   exactly as Kodiak encoded it. When the radio has a fix, the same LXMF
+//!   message also carries the radio's position as telemetry (field `0x02`),
+//!   so RCH and REM can place the event on the map. Without a fix the report
+//!   is still sent, without telemetry.
 //! - Contact reports become an RCH map marker (`mission.marker.create`) at the
 //!   computed contact position.
 //! - RCH commands are sent unchanged as RCH field commands from the radio's
@@ -17,9 +17,10 @@
 //! - Rejections are never sent.
 //!
 //! Position rule: use the GPS fix from this transmission's BSS packet,
-//! otherwise the radio's last valid fix. With no fix ever received, MECP and
-//! contact reports are ignored locally. A contact marker also ignores a last
-//! fix older than the configured age, since the operator may have moved.
+//! otherwise the radio's last valid fix. With no fix ever received, contact
+//! reports are ignored locally and MECP reports go out without telemetry. A
+//! contact marker also ignores a last fix older than the configured age,
+//! since the operator may have moved.
 //!
 //! Heading rule: clock directions need a verified compass heading from this
 //! transmission's own BSS packet. The BSS heading counts only when the
@@ -30,14 +31,14 @@ use std::fmt::Write as _;
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
-use kodiak_core::mecp::MAX_MESSAGE_BYTES;
-use kodiak_core::{Affiliation, ContactReport, Direction, Intent, KodiakResult, MecpReport};
+use kodiak_core::{Affiliation, ContactReport, Direction, Intent, KodiakResult};
 use lxmf_core::constants::FIELD_COMMANDS;
 use rns_transport::hash::AddressHash;
 use serde_json::{Value, json};
 
 use crate::bss::Position;
 use crate::output::frequency_label;
+use crate::telemetry;
 
 /// Mean Earth radius in metres (IUGG).
 const EARTH_RADIUS_M: f64 = 6_371_008.8;
@@ -75,9 +76,12 @@ pub struct Context<'a> {
 }
 
 impl Context<'_> {
-    fn position(&self) -> Option<Position> {
+    /// The radio's fix and when it was received: this transmission's fix,
+    /// otherwise the last valid one.
+    fn fix(&self) -> Option<(Position, DateTime<Utc>)> {
         self.current
-            .or(self.last_known.map(|(position, _)| position))
+            .map(|position| (position, self.timestamp))
+            .or(self.last_known)
     }
 
     /// The observer's position for a contact marker: the current fix, or a
@@ -131,28 +135,17 @@ pub fn plan(text: &str, result: Option<&KodiakResult>, context: &Context<'_>) ->
     };
     match intent {
         Intent::MecpReport(report) => {
-            let log_entry = if report.has_spoken_coordinates() {
-                report.content.clone()
-            } else {
-                let Some(position) = context.position() else {
-                    return Ok(no_position());
-                };
-                with_position(report, position)
-            };
-            if log_entry.len() > MAX_MESSAGE_BYTES {
-                return Ok(Plan::Ignore(format!(
-                    "the MECP report with the radio's position is {} bytes; MECP allows {MAX_MESSAGE_BYTES}",
-                    log_entry.len()
-                )));
-            }
-            let fields = command_fields(
+            let mut fields = vec![command_field(
                 "mission.registry.log_entry.upsert",
-                &json!({ "content": log_entry }),
+                &json!({ "content": report.content }),
                 context.event_id,
-            )?;
+            )?];
+            if let Some((position, received_at)) = context.fix() {
+                fields.push(telemetry::field(context.radio_name, position, received_at)?);
+            }
             Ok(Plan::Command {
-                body: log_entry,
-                fields,
+                body: report.content.clone(),
+                fields: encode_fields(fields)?,
             })
         }
         Intent::ContactReport(report) => contact(report, text, context),
@@ -168,28 +161,6 @@ pub fn plan(text: &str, result: Option<&KodiakResult>, context: &Context<'_>) ->
             })
         }
     }
-}
-
-fn no_position() -> Plan {
-    Plan::Ignore("no valid GPS position has been received from this radio".into())
-}
-
-/// The MECP message with the radio's position as its coordinates token, in
-/// the canonical place after the codes and person count. A report with no
-/// spoken values keeps the version 1 form, `MECP/1/S02 40.000000,-75.000000`.
-fn with_position(report: &MecpReport, position: Position) -> String {
-    let mut head = format!("MECP/{}/{}", report.severity, report.codes.join(" "));
-    if let Some(pax) = report.parameters.pax {
-        let _ = write!(head, " {pax}pax");
-    }
-    let tail = report
-        .content
-        .strip_prefix(head.as_str())
-        .unwrap_or_default();
-    format!(
-        "{head} {:.6},{:.6}{tail}",
-        position.latitude, position.longitude
-    )
 }
 
 fn contact(report: &ContactReport, text: &str, context: &Context<'_>) -> Result<Plan> {
@@ -285,21 +256,36 @@ pub fn destination(latitude: f64, longitude: f64, bearing_deg: u16, distance_m: 
 
 /// LXMF fields `{9: [{"command_id", "command_type", "args"}]}` as `MessagePack`.
 pub fn command_fields(command_type: &str, args: &Value, command_id: &str) -> Result<Vec<u8>> {
+    encode_fields(vec![command_field(command_type, args, command_id)?])
+}
+
+/// The command field `(9, [{"command_id", "command_type", "args"}])`.
+fn command_field(
+    command_type: &str,
+    args: &Value,
+    command_id: &str,
+) -> Result<(rmpv::Value, rmpv::Value)> {
     let entry = json!([{ "command_id": command_id, "command_type": command_type, "args": args }]);
     let encoded = rmp_serde::to_vec_named(&entry).context("encode RCH command")?;
     let commands =
         rmpv::decode::read_value(&mut encoded.as_slice()).context("re-read RCH command")?;
-    let map = rmpv::Value::Map(vec![(rmpv::Value::from(FIELD_COMMANDS), commands)]);
-    let mut fields = Vec::new();
-    rmpv::encode::write_value(&mut fields, &map)?;
-    Ok(fields)
+    Ok((rmpv::Value::from(FIELD_COMMANDS), commands))
+}
+
+/// LXMF fields as one `MessagePack` map.
+fn encode_fields(fields: Vec<(rmpv::Value, rmpv::Value)>) -> Result<Vec<u8>> {
+    let mut encoded = Vec::new();
+    rmpv::encode::write_value(&mut encoded, &rmpv::Value::Map(fields))?;
+    Ok(encoded)
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
-    use kodiak_core::{Coordinates, MecpParameters, RchCommand, RejectReason, Rejection};
+    use kodiak_core::{
+        Coordinates, MecpParameters, MecpReport, RchCommand, RejectReason, Rejection,
+    };
 
     use super::*;
 
@@ -413,43 +399,89 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn mecp_uses_current_then_last_fix_and_never_invents_one() {
-        let report = intent(Intent::MecpReport(MecpReport::single(1, "S02").unwrap()));
-        let current = Some(fix(40.0, -75.0, None));
-        let last = Some(fix(41.0, -74.0, None));
-        let entry = command(&plan("", Some(&report), &context(current, last, false)).unwrap());
-        assert_eq!(entry["command_type"], "mission.registry.log_entry.upsert");
-        assert_eq!(entry["command_id"], ID);
-        assert_eq!(entry["args"]["content"], "MECP/1/S02 40.000000,-75.000000");
-        let entry = command(&plan("", Some(&report), &context(None, last, false)).unwrap());
-        assert_eq!(entry["args"]["content"], "MECP/1/S02 41.000000,-74.000000");
-        assert!(matches!(
-            plan("", Some(&report), &context(None, None, false)).unwrap(),
-            Plan::Ignore(_)
-        ));
+    /// The fields of a planned command, by field number.
+    fn fields(plan: &Plan) -> BTreeMap<u64, rmpv::Value> {
+        let Plan::Command { fields, .. } = plan else {
+            panic!("expected a command, got {plan:?}");
+        };
+        let map = rmpv::decode::read_value(&mut fields.as_slice()).unwrap();
+        map.as_map()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.as_u64().unwrap(), value.clone()))
+            .collect()
+    }
+
+    /// The decoded telemetry in field `0x02`.
+    fn telemetry_of(plan: &Plan) -> serde_json::Value {
+        use base64::Engine as _;
+        let fields = fields(plan);
+        let packed = fields[&2].as_slice().expect("telemetry must be binary");
+        r3akt_map_core::telemetry::decode_field(&json!(
+            base64::engine::general_purpose::STANDARD.encode(packed)
+        ))
+        .unwrap()
+        .telemetry
     }
 
     #[test]
-    fn multi_code_mecp_keeps_spoken_values_and_adds_telemetry_in_place() {
+    fn mecp_is_sent_unchanged_with_the_fix_as_telemetry_in_the_same_message() {
+        let report = intent(Intent::MecpReport(MecpReport::single(1, "S02").unwrap()));
+        let current = Some(fix(40.0, -75.0, None));
+        let last = Some(fix(41.0, -74.0, None));
+
+        let sent = plan("", Some(&report), &context(current, last, false)).unwrap();
+        assert!(matches!(&sent, Plan::Command { body, .. } if body == "MECP/1/S02"));
+        assert_eq!(fields(&sent).keys().copied().collect::<Vec<_>>(), [2, 9]);
+        let entry = command(&sent);
+        assert_eq!(entry["command_type"], "mission.registry.log_entry.upsert");
+        assert_eq!(entry["command_id"], ID);
+        assert_eq!(entry["args"]["content"], "MECP/1/S02");
+        let telemetry = telemetry_of(&sent);
+        assert_eq!(telemetry["information"]["contents"], "R4");
+        assert_eq!(telemetry["location"]["latitude"], 40.0);
+        assert_eq!(telemetry["location"]["longitude"], -75.0);
+        assert_eq!(
+            telemetry["location"]["last_update_timestamp"],
+            now().timestamp()
+        );
+
+        // The last fix, stamped with when it was received.
+        let sent = plan("", Some(&report), &context(None, last, false)).unwrap();
+        assert_eq!(command(&sent)["args"]["content"], "MECP/1/S02");
+        let telemetry = telemetry_of(&sent);
+        assert_eq!(telemetry["location"]["latitude"], 41.0);
+        assert_eq!(
+            telemetry["location"]["last_update_timestamp"],
+            now().timestamp() - 60
+        );
+
+        // No fix at all: still sent, with field 9 only.
+        let sent = plan("", Some(&report), &context(None, None, false)).unwrap();
+        assert_eq!(fields(&sent).keys().copied().collect::<Vec<_>>(), [9]);
+        assert_eq!(command(&sent)["args"]["content"], "MECP/1/S02");
+    }
+
+    #[test]
+    fn multi_code_mecp_keeps_spoken_values_unchanged() {
         let fix = Some(fix(40.0, -75.0, None));
         let spoken = |parameters: MecpParameters| {
             intent(Intent::MecpReport(
                 MecpReport::encode(0, vec!["M01".into(), "S01".into()], parameters).unwrap(),
             ))
         };
-        // Telemetry goes after the codes and person count.
         let report = spoken(MecpParameters {
             pax: Some(3),
             callsign: Some("BRAVO-6".into()),
             ..MecpParameters::default()
         });
-        let entry = command(&plan("", Some(&report), &context(fix, None, false)).unwrap());
+        let sent = plan("", Some(&report), &context(fix, None, false)).unwrap();
         assert_eq!(
-            entry["args"]["content"],
-            "MECP/0/M01 S01 3pax 40.000000,-75.000000 ~BRAVO-6"
+            command(&sent)["args"]["content"],
+            "MECP/0/M01 S01 3pax ~BRAVO-6"
         );
-        // Spoken coordinates are sent as spoken, even with no fix at all.
+        assert_eq!(telemetry_of(&sent)["location"]["latitude"], 40.0);
+        // Spoken coordinates stay in the text; the fix goes in telemetry.
         let report = spoken(MecpParameters {
             coordinates: Some(Coordinates {
                 latitude: 45.5,
@@ -457,16 +489,21 @@ mod tests {
             }),
             ..MecpParameters::default()
         });
-        let entry = command(&plan("", Some(&report), &context(None, None, false)).unwrap());
-        assert_eq!(entry["args"]["content"], "MECP/0/M01 S01 45.5,-73.25");
-        // Over 200 bytes once the position is added: not sent.
+        let sent = plan("", Some(&report), &context(fix, None, false)).unwrap();
+        assert_eq!(
+            command(&sent)["args"]["content"],
+            "MECP/0/M01 S01 45.5,-73.25"
+        );
+        assert_eq!(telemetry_of(&sent)["location"]["longitude"], -75.0);
+        // The text is never lengthened, so a long report is still sent.
         let report = spoken(MecpParameters {
             text: Some("x".repeat(170)),
             ..MecpParameters::default()
         });
-        assert!(
-            ignored(&plan("", Some(&report), &context(fix, None, false)).unwrap()).contains("200")
-        );
+        assert!(matches!(
+            plan("", Some(&report), &context(fix, None, false)).unwrap(),
+            Plan::Command { .. }
+        ));
     }
 
     #[test]

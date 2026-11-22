@@ -10,7 +10,17 @@ use serde_json::json;
 
 use crate::bss::Position;
 
+/// LXMF fields `{2: <telemetry>}` as `MessagePack`.
 pub fn fields(name: &str, pos: Position, received_at: DateTime<Utc>) -> Result<Vec<u8>> {
+    let map = Value::Map(vec![field(name, pos, received_at)?]);
+    let mut fields = Vec::new();
+    rmpv::encode::write_value(&mut fields, &map)?;
+    Ok(fields)
+}
+
+/// The telemetry field `(0x02, <packed telemetry>)`, to combine with other
+/// fields in one LXMF message.
+pub fn field(name: &str, pos: Position, received_at: DateTime<Utc>) -> Result<(Value, Value)> {
     let seconds = u64::try_from(received_at.timestamp())?;
     // Use Telemeter's standard time and Information sensors. Current RCH also
     // accepts a named location projection, which can omit unmeasured readings.
@@ -32,10 +42,7 @@ pub fn fields(name: &str, pos: Position, received_at: DateTime<Utc>) -> Result<V
     projection["location"] = location;
     let bytes = rmp_serde::to_vec_named(&projection)?;
     decode_field(&json!(STANDARD.encode(&bytes))).map_err(|e| anyhow!(e))?;
-    let map = Value::Map(vec![(Value::from(FIELD_TELEMETRY), Value::Binary(bytes))]);
-    let mut fields = Vec::new();
-    rmpv::encode::write_value(&mut fields, &map)?;
-    Ok(fields)
+    Ok((Value::from(FIELD_TELEMETRY), Value::Binary(bytes)))
 }
 
 #[cfg(test)]

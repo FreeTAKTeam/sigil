@@ -272,11 +272,11 @@ Retries back off at `min(3 × 2^attempts, 300)` seconds. Each radio has its own 
 
 - A transcript without a Kodiak intent becomes a chat message with the body `Radio: <name>\nFrequency: <MHz>\nTime: <RFC3339>\n\n<text>`.
 - A transcript with a Kodiak intent goes through `intents::plan`, which produces one of three messages, all sent with LXMF field `0x09` (`FIELD_COMMANDS`) and message kind `Application`:
-  - an MECP report becomes `mission.registry.log_entry.upsert` with the position appended;
+  - an MECP report becomes `mission.registry.log_entry.upsert` with the unmodified MECP text, plus field `0x02` telemetry (`telemetry::field`) in the same message when the radio has a fix;
   - a contact report becomes `mission.marker.create` at the computed contact position;
   - an RCH command is forwarded with its own name, so RCH authorizes it.
 - A Kodiak rejection is recorded as `ignored` in the journal, with the reason in `detail`, and nothing is sent.
-- **Position rule:** use the current BSS fix, otherwise the radio's last valid fix (`Registry::last_position`). With neither, the report is ignored.
+- **Position rule:** use the current BSS fix, otherwise the radio's last valid fix (`Registry::last_position`). With neither, a contact report is ignored and an MECP report is sent without telemetry.
 - A position becomes an empty-content message with field `0x02`. `telemetry::fields` builds it from `r3akt-map-core`'s time and Information sensors plus a named `location` projection with latitude, longitude, timestamp, and altitude, speed and bearing when known. It does not include accuracy. It round-trips the result through RCH's decoder before sending.
 
 ## Legacy Python publisher
