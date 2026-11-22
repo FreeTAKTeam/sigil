@@ -236,6 +236,14 @@ fn main() -> Result<()> {
                         bss_diagnostics,
                         bss_capture.as_deref(),
                     )
+                    .map(|decoder| {
+                        decoder.with_antenna(
+                            config
+                                .receiver
+                                .antenna
+                                .map(|antenna| (antenna.latitude, antenna.longitude)),
+                        )
+                    })
                 })
                 .transpose()?;
             let publication = config

@@ -14,6 +14,24 @@ pub struct Config {
     pub fabric: Fabric,
     pub rch: Rch,
     pub kodiak: Kodiak,
+    pub receiver: Receiver,
+}
+
+/// Where the gateway itself is.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Receiver {
+    /// Position of the SDR antenna. When set, the log shows each BSS
+    /// packet's distance from the antenna. Events are unchanged.
+    pub antenna: Option<Antenna>,
+}
+
+/// A WGS84 position in decimal degrees (south and west negative).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Antenna {
+    pub latitude: f64,
+    pub longitude: f64,
 }
 
 #[derive(Deserialize)]
@@ -183,6 +201,19 @@ impl Config {
             !name.is_empty() && name.len() <= 64 && !name.contains(char::is_control),
             "unidentified_name must be 1-64 printable characters"
         );
+        if let Some(Antenna {
+            latitude,
+            longitude,
+        }) = config.receiver.antenna
+        {
+            ensure!(
+                latitude.is_finite()
+                    && longitude.is_finite()
+                    && (-90.0..=90.0).contains(&latitude)
+                    && (-180.0..=180.0).contains(&longitude),
+                "[receiver] antenna must be latitude -90..90 and longitude -180..180"
+            );
+        }
         let directory = path.parent().unwrap_or_else(|| Path::new("."));
         config.identity.registry_path = directory.join(&config.identity.registry_path);
         config.fabric.local_storage_path = directory.join(&config.fabric.local_storage_path);

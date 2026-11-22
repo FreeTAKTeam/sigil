@@ -41,7 +41,7 @@ use crate::output::frequency_label;
 use crate::telemetry;
 
 /// Mean Earth radius in metres (IUGG).
-const EARTH_RADIUS_M: f64 = 6_371_008.8;
+pub const EARTH_RADIUS_M: f64 = 6_371_008.8;
 
 /// What the publisher should do with one transcript event.
 #[derive(Debug, PartialEq)]
@@ -141,7 +141,7 @@ pub fn plan(text: &str, result: Option<&KodiakResult>, context: &Context<'_>) ->
                 context.event_id,
             )?];
             if let Some((position, received_at)) = context.fix() {
-                fields.push(telemetry::field(context.radio_name, position, received_at)?);
+                fields.push(telemetry::field(position, received_at)?);
             }
             Ok(Plan::Command {
                 body: report.content.clone(),
@@ -438,12 +438,11 @@ mod tests {
         assert_eq!(entry["command_id"], ID);
         assert_eq!(entry["args"]["content"], "MECP/1/S02");
         let telemetry = telemetry_of(&sent);
-        assert_eq!(telemetry["information"]["contents"], "R4");
         assert_eq!(telemetry["location"]["latitude"], 40.0);
         assert_eq!(telemetry["location"]["longitude"], -75.0);
         assert_eq!(
-            telemetry["location"]["last_update_timestamp"],
-            now().timestamp()
+            telemetry["location"]["last_update_timestamp"].as_f64(),
+            Some(1_800_000_000.0)
         );
 
         // The last fix, stamped with when it was received.
@@ -452,14 +451,69 @@ mod tests {
         let telemetry = telemetry_of(&sent);
         assert_eq!(telemetry["location"]["latitude"], 41.0);
         assert_eq!(
-            telemetry["location"]["last_update_timestamp"],
-            now().timestamp() - 60
+            telemetry["location"]["last_update_timestamp"].as_f64(),
+            Some(1_800_000_000.0 - 60.0)
         );
 
         // No fix at all: still sent, with field 9 only.
         let sent = plan("", Some(&report), &context(None, None, false)).unwrap();
         assert_eq!(fields(&sent).keys().copied().collect::<Vec<_>>(), [9]);
         assert_eq!(command(&sent)["args"]["content"], "MECP/1/S02");
+    }
+
+    /// How LXMF would deliver `plan` over a link, by its own rule
+    /// (`lxmf_runtime::delivery`: wire length minus `LXMF_OVERHEAD`).
+    fn link_representation(plan: &Plan) -> lxmf_core::message::MessageMethod {
+        use lxmf_core::constants::{DESTINATION_LENGTH, LXMF_OVERHEAD, SIGNATURE_LENGTH};
+        use lxmf_core::message::{Payload, TransportMethod, decide_delivery};
+        let Plan::Command { body, fields } = plan else {
+            panic!("expected a command, got {plan:?}");
+        };
+        let fields = rmpv::decode::read_value(&mut fields.as_slice()).unwrap();
+        let payload = Payload::new(
+            1_800_000_000.0,
+            Some(body.clone().into_bytes()),
+            Some(Vec::new()),
+            Some(fields),
+            None,
+        );
+        // `WireMessage::pack`: destination, source, signature, payload.
+        let wire = 2 * DESTINATION_LENGTH + SIGNATURE_LENGTH + payload.to_msgpack().unwrap().len();
+        let size = wire - LXMF_OVERHEAD;
+        decide_delivery(TransportMethod::Direct, false, size)
+            .unwrap()
+            .representation
+    }
+
+    #[test]
+    fn mecp_reports_with_telemetry_fit_one_link_packet() {
+        use lxmf_core::message::MessageMethod;
+        let full = Position {
+            latitude: -43.966_633,
+            longitude: -166.125_633,
+            altitude_m: Some(-1_200),
+            speed_kmh: Some(120),
+            heading_deg: Some(359),
+        };
+        let mut facts = context(Some(full), None, false);
+        // A live event ID, as long as the ones Sigil writes.
+        facts.event_id = "voice-20261122T205620.420176900Z-72580";
+        for report in [
+            MecpReport::single(0, "L06").unwrap(),
+            MecpReport::encode(
+                0,
+                vec!["M01".into(), "M07".into(), "S01".into()],
+                MecpParameters {
+                    pax: Some(12),
+                    callsign: Some("BRAVO-6".into()),
+                    ..MecpParameters::default()
+                },
+            )
+            .unwrap(),
+        ] {
+            let sent = plan("", Some(&intent(Intent::MecpReport(report))), &facts).unwrap();
+            assert_eq!(link_representation(&sent), MessageMethod::Packet);
+        }
     }
 
     #[test]

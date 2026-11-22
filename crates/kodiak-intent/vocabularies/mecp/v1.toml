@@ -1,4 +1,4 @@
-# Kodiak MECP voice vocabulary, version 1, revision 6.
+# Kodiak MECP voice vocabulary, version 1, revision 7.
 #
 # Codes, labels and severities follow the canonical MECP tables:
 #   REM  apps/mobile/src/utils/mecp.ts               (commit 3e1e172)
@@ -20,7 +20,7 @@
 
 schema = "kodiak.vocabulary.mecp"
 version = 1
-revision = 6
+revision = 7
 
 # Words that may surround an MECP report without changing its meaning.
 fillers = ["we", "i", "a", "an", "the", "is", "are", "am", "please", "more", "some",
@@ -430,7 +430,7 @@ phrases = ["rendezvous", "rendezvous at", "meet at", "meeting point"]
 [[codes]]
 code = "R01"
 label = "Acknowledged"
-phrases = ["acknowledged", "acknowledge", "copy", "roger", "received"]
+phrases = ["acknowledged", "acknowledge", "copy", "roger", "received", "and knowledge"]
 
 [[codes]]
 code = "R02"
@@ -440,7 +440,7 @@ phrases = ["help coming", "help is coming", "help on the way", "help is on the w
 [[codes]]
 code = "R03"
 label = "ETA [minutes]"
-phrases = ["eta", "e t a", "estimated time of arrival", "arriving in"]
+phrases = ["eta", "e t a", "estimated time of arrival", "arriving in", "eighty a"]
 # Accepts an optional number of minutes, encoded as a bare number token.
 argument = "eta_minutes"
 
@@ -504,7 +504,7 @@ phrases = ["food ready", "food is ready", "dinner ready", "dinner is ready"]
 [[codes]]
 code = "L04"
 label = "Summit reached"
-phrases = ["summit reached", "reached the summit", "at the summit", "summit"]
+phrases = ["summit reached", "reached the summit", "at the summit", "summit", "summit reach"]
 
 [[codes]]
 code = "L05"
@@ -519,17 +519,17 @@ phrases = ["running late", "late"]
 [[codes]]
 code = "L07"
 label = "Good signal here"
-phrases = ["good signal here", "good signal"]
+phrases = ["good signal here", "good signal", "good signal ear"]
 
 [[codes]]
 code = "L08"
 label = "Photo opportunity"
-phrases = ["photo opportunity", "photo op"]
+phrases = ["photo opportunity", "photo op", "fort opportunity", "for opportunity"]
 
 [[codes]]
 code = "L09"
 label = "Wildlife spotted"
-phrases = ["wildlife spotted", "wildlife"]
+phrases = ["wildlife spotted", "wildlife", "wildlife sport", "wildlife spot"]
 
 [[codes]]
 code = "L10"

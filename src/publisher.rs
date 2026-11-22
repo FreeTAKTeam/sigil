@@ -338,7 +338,7 @@ impl<'a> Publisher<'a> {
             },
             Kind::Position { position, .. } if self.config.rch.send_telemetry => (
                 String::new(),
-                Some(telemetry::fields(name, *position, event.timestamp)?),
+                Some(telemetry::fields(*position, event.timestamp)?),
                 MessageKind::Telemetry {
                     key: event.id.clone(),
                 },
@@ -855,9 +855,8 @@ mod tests {
                 .context("telemetry must be binary field 0x02")?;
             let decoded = r3akt_map_core::telemetry::decode_field(&json!(STANDARD.encode(packed)))
                 .map_err(|error| anyhow!(error))?;
-            assert_eq!(decoded.telemetry["information"]["contents"], name);
             assert_eq!(decoded.telemetry["location"]["latitude"], 40.0);
-            assert!(decoded.telemetry["location"].get("accuracy").is_none());
+            assert_eq!(decoded.telemetry["location"]["accuracy"], 0.0);
             known.push((name, registered.destination));
         }
         assert_ne!(known[0].1, known[1].1);
