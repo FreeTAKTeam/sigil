@@ -278,7 +278,7 @@ Retries back off at `min(3 × 2^attempts, 300)` seconds. Each radio has its own 
   - an RCH command is forwarded with its own name, so RCH authorizes it.
 - A Kodiak rejection is recorded as `ignored` in the journal, with the reason in `detail`, and nothing is sent.
 - **Position rule:** use the current BSS fix, otherwise the radio's last valid fix (`Registry::last_position`). With neither, a contact report is ignored and an MECP report is sent without telemetry.
-- A position becomes an empty-content message with field `0x02`. `telemetry::fields` builds it from `r3akt-map-core`'s time and Information sensors plus a named `location` projection with latitude, longitude, timestamp, and altitude, speed and bearing when known. It does not include accuracy. It round-trips the result through RCH's decoder before sending.
+- A position becomes an empty-content message with field `0x02`. `telemetry::fields` encodes it with `r3akt-map-core`'s `telemetry_encode::encode`, exactly as REM encodes a position: time and location sensors, with 0 for readings BSS does not carry (accuracy, and altitude, speed or bearing when absent).
 
 ## Legacy Python publisher
 
@@ -308,9 +308,9 @@ The Rust tests are hardware-free and synthesize their own signals:
 | `correlation::*` | Trailing-only attribution, ambiguity, gaps, ID sanitizing |
 | `processing::*` | Carrier-tail masking. Telemetry is not blocked by slow ASR, and the trailing ID is attributed end to end. |
 | `identity::*` | Distinct keys, lock exclusivity, restart, backup restore, corruption detection |
-| `telemetry::*` | RCH decodes a sparse location without a fabricated accuracy |
+| `telemetry::*` | RCH's decoder reads the REM Telemeter encoding back |
 | `publisher::*` | Loopback Reticulum peer receives signed chat and telemetry from two radio identities, plus a Kodiak RCH command as field 9. A rejected Kodiak command is not sent. Identities survive a restart. |
-| `intents::*` | Contact geodesy, the position fallback, the heading rule, MECP and marker field commands, RCH pass-through |
+| `intents::*` | Contact geodesy, the position fallback, the heading rule, MECP and marker field commands, RCH pass-through, MECP reports with telemetry fit one LXMF link packet |
 | `tests/kodiak_isolation.rs` | Kodiak packages reference no Sigil, LXMF, Reticulum or SDR code |
 | `kodiak-*` packages | Result contract, wake word, shared lazy model, 94-case evaluation set, fuzzy correction, about 1,000 generated utterances. See [docs/kodiak.md](kodiak.md). |
 
