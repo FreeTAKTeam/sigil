@@ -10,14 +10,30 @@ pub struct Token {
 /// Splits text into words.
 ///
 /// Letters and digits form words; everything else separates them, except that
-/// `:` and `.` between digits are kept (`3:30`, `1.5`), commas between digits
-/// are dropped (`1,000`), and a number glued to letters is split (`200m`).
+/// `:` and `.` between digits are kept (`3:30`, `1.5`), a thousands comma is
+/// dropped (`1,000`), a `-` that starts a number is kept (`-73.5`), and a
+/// number glued to letters is split (`200m`).
+///
+/// A comma counts as a thousands separator only when exactly three digits
+/// follow it and no decimal point precedes it, so `45.5,-73.5` and
+/// `45.5017,73.5673` stay two numbers.
 #[must_use]
 pub fn tokenize(text: &str) -> Vec<Token> {
     let characters: Vec<char> = text.chars().collect();
     let mut tokens = Vec::new();
     let mut current = String::new();
     let digit = |index: usize| characters.get(index).is_some_and(char::is_ascii_digit);
+    let thousands = |index: usize, current: &str| {
+        let run = characters[index + 1..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        run == 3
+            && !current.contains('.')
+            && characters
+                .get(index + 4)
+                .is_none_or(|c| *c != '.' && !c.is_ascii_digit())
+    };
     let flush = |current: &mut String, tokens: &mut Vec<Token>| {
         if !current.is_empty() {
             tokens.push(Token {
@@ -36,14 +52,20 @@ pub fn tokenize(text: &str) -> Vec<Token> {
             if boundary
                 && current
                     .chars()
-                    .all(|c| c.is_ascii_digit() || c == '.' || c == ':')
+                    .all(|c| c.is_ascii_digit() || c == '.' || c == ':' || c == '-')
             {
                 flush(&mut current, &mut tokens);
             }
             current.push(character);
         } else if between_digits && (character == ':' || character == '.') {
             current.push(character);
-        } else if !(between_digits && character == ',') {
+        } else if character == '-'
+            && digit(index + 1)
+            && (index == 0 || !characters[index - 1].is_alphanumeric())
+        {
+            flush(&mut current, &mut tokens);
+            current.push(character);
+        } else if !(between_digits && character == ',' && thousands(index, &current)) {
             flush(&mut current, &mut tokens);
         }
     }
@@ -293,6 +315,10 @@ mod tests {
             ]
         );
         assert_eq!(words("E.A.M. status"), ["e", "a", "m", "status"]);
+        assert_eq!(words("45.5017,-73.5673"), ["45.5017", "-73.5673"]);
+        assert_eq!(words("45.5017,73.5673"), ["45.5017", "73.5673"]);
+        assert_eq!(words("12,500 m 1,000,000"), ["12500", "m", "1000000"]);
+        assert_eq!(words("1-2-3, -5"), ["1", "2", "3", "-5"]);
         assert_eq!(tokenize("Bravo Six")[1].original, "Six");
     }
 

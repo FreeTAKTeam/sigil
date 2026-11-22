@@ -5,7 +5,7 @@ Versioned vocabularies and intent classifiers for R3AKT Kodiak.
 - `vocabularies/mecp/v1.toml`: MECP severities and all 108 event codes shared by REM and RCH, with spoken phrases.
 - `vocabularies/contact/v1.toml`: affiliations, clock positions, bearings, units, classifications and activities for contact reports.
 - `vocabularies/rch/v1.toml`: spoken phrases for RCH's canonical command names, including `mission.time` and `mission.library.list` (with an optional `search`).
-- `DeterministicClassifier`: rule-based classifier over those vocabularies (`deterministic/3`). It first corrects unknown words to the closest-sounding vocabulary word when one is clearly closest, and reports each correction. It then rejects anything it cannot parse completely, and never reports a confidence value. When the activation word is missing, a first word close to "kodiak" ("Kardiac", "Podax") still activates if the rest is a recognized command (`first_word_wake`).
+- `DeterministicClassifier`: rule-based classifier over those vocabularies (`deterministic/4`). It first corrects unknown words to the closest-sounding vocabulary word when one is clearly closest, and reports each correction. It then rejects anything it cannot parse completely, and never reports a confidence value. When the activation word is missing, a first word close to "kodiak" ("Kardiac", "Podax") still activates if the rest is a recognized command (`first_word_wake`).
 - `dataset::generate()`: about 1,000 labelled utterances generated from the vocabularies, for training a model.
 - `datasets/eval.v1.jsonl`: a hand-written evaluation set of 94 utterances.
 

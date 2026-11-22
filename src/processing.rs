@@ -105,7 +105,8 @@ enum Event {
     Done(Lane, Option<String>),
     Inferred {
         id: String,
-        result: Result<KodiakResult>,
+        // Boxed: a Kodiak result is far larger than the other events.
+        result: Box<Result<KodiakResult>>,
     },
 }
 
@@ -194,7 +195,13 @@ where
                             Err(anyhow::anyhow!("recognition worker panicked"))
                         })
                     };
-                    if send_events.send(Event::Inferred { id, result }).is_err() {
+                    if send_events
+                        .send(Event::Inferred {
+                            id,
+                            result: Box::new(result),
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -436,7 +443,7 @@ impl<'a> Coordinator<'a> {
             }
             Event::Inferred { id, result } => {
                 if let Some(pending) = self.pending.iter_mut().find(|pending| pending.id == id) {
-                    pending.text = Some(result);
+                    pending.text = Some(*result);
                 }
             }
         }

@@ -6,7 +6,7 @@ R3AKT Kodiak is developed inside the Sigil workspace for now. Its three packages
 
 | Path | Package | Purpose |
 |---|---|---|
-| `crates/kodiak-core` | `kodiak-core` | Result contract (`kodiak.result.v1`), wake-word gate, `Engine`, `Transcriber` and `IntentClassifier` traits |
+| `crates/kodiak-core` | `kodiak-core` | Result contract (`kodiak.result.v2`), wake-word gate, `Engine`, `Transcriber` and `IntentClassifier` traits |
 | `crates/kodiak-asr` | `kodiak-asr` | Offline recognizers: whisper.cpp (feature `whisper`, default) and Parakeet TDT via Sherpa-ONNX (feature `parakeet`) |
 | `crates/kodiak-intent` | `kodiak-intent` | Versioned vocabularies, the deterministic classifier, datasets, the text CLI and evaluation examples |
 | `crates/kodiak-laya` | `kodiak-laya` | Optional laya typed-decision classifier (`laya/1`), its questions and the `evaluate_laya` benchmark. Depends on `laya-candle` (Apache-2.0): binaries that include it are GPLv3-or-later; see its `NOTICE`. Model files are not part of the package. |
@@ -68,7 +68,7 @@ On Windows, whisper.cpp's CMake build fails if the build directory path is too l
 
 | Type | Owner | Notes |
 |---|---|---|
-| `KodiakResult`, `Intent`, `MecpReport`, `ContactReport`, `RchCommand`, `Rejection`, `RejectReason`, `Category`, `Affiliation`, `Direction` | `kodiak-core` | Serialized as `kodiak.result.v1`. An incompatible change needs a new schema version. |
+| `KodiakResult`, `Intent`, `MecpReport`, `ContactReport`, `RchCommand`, `Rejection`, `RejectReason`, `Category`, `Affiliation`, `Direction` | `kodiak-core` | Serialized as `kodiak.result.v2` (reads v1). An incompatible change needs a new schema version. |
 | `AudioInput`, `TextInput`, `Engine`, `Transcriber`, `IntentClassifier`, `WakeWord`, `KodiakError` | `kodiak-core` | |
 | MECP, contact and RCH vocabularies (`kodiak.vocabulary.*`, version 1) | `kodiak-intent` | MECP codes mirror REM and RCH. RCH intent names are RCH's canonical command names. |
 | `Plan`, RCH field-command encoding, contact geodesy, position and heading policy | Sigil (`src/intents.rs`) | Never moves into Kodiak |

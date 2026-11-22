@@ -597,14 +597,17 @@ impl Registry {
     }
 
     /// The last valid GPS fix received from an allowlisted radio.
+    #[cfg(test)]
     pub fn last_position(&self, id: &str) -> Result<Option<Position>> {
+        Ok(self.last_fix(id)?.map(|last| last.position))
+    }
+
+    /// The last valid GPS fix of an allowlisted radio, with when it arrived.
+    pub fn last_fix(&self, id: &str) -> Result<Option<LastPosition>> {
         if !self.allowed.contains(id) {
             return Ok(None);
         }
-        Ok(self
-            .record(id)?
-            .and_then(|radio| radio.last_position)
-            .map(|last| last.position))
+        Ok(self.record(id)?.and_then(|radio| radio.last_position))
     }
 
     /// The identity for a radio heard on air, registering it on first sight

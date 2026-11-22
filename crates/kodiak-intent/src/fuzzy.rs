@@ -129,12 +129,13 @@ pub struct Corrector {
 }
 
 impl Corrector {
-    pub fn new(mut known: BTreeSet<String>) -> Self {
+    /// Corrects unknown words to `known` words, never to one in `excluded`.
+    pub fn new(mut known: BTreeSet<String>, excluded: &BTreeSet<String>) -> Self {
         known.extend(PROTECTED.iter().map(|word| (*word).to_owned()));
         let candidates = known
             .iter()
             .filter(|word| word.chars().count() >= 3 && word.chars().all(char::is_alphabetic))
-            .filter(|word| !PROTECTED.contains(&word.as_str()))
+            .filter(|word| !PROTECTED.contains(&word.as_str()) && !excluded.contains(*word))
             .cloned()
             .collect();
         Self { known, candidates }
@@ -198,6 +199,7 @@ mod tests {
             ]
             .map(String::from)
             .into(),
+            &BTreeSet::new(),
         )
     }
 

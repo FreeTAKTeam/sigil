@@ -13,6 +13,7 @@
 //! synchronous because recognition and classification are CPU-bound; async
 //! callers should run it on a blocking thread pool.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
 
@@ -110,6 +111,12 @@ pub trait IntentClassifier: Send + Sync {
     fn addressed(&self, transcript: &str) -> Option<Addressed> {
         let _ = transcript;
         None
+    }
+
+    /// Name and version of every vocabulary the classifier uses, recorded in
+    /// every intent and rejection. Empty by default.
+    fn vocabularies(&self) -> BTreeMap<String, String> {
+        BTreeMap::new()
     }
 }
 
@@ -228,6 +235,7 @@ impl Engine {
             },
         };
         let classifier = self.classifier.id().to_owned();
+        let vocabularies = self.classifier.vocabularies();
         let Classification {
             result,
             mut corrections,
@@ -249,6 +257,7 @@ impl Engine {
                 classifier,
                 corrections,
                 confidence,
+                vocabularies,
             },
             Err(rejection) => KodiakResult::Rejected {
                 rejection,
@@ -256,6 +265,7 @@ impl Engine {
                 classifier,
                 corrections,
                 confidence,
+                vocabularies,
             },
         }
     }

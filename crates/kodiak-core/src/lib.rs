@@ -19,6 +19,7 @@
 //! classifiers.
 
 mod engine;
+pub mod mecp;
 mod result;
 mod wake;
 
@@ -27,8 +28,8 @@ pub use engine::{
     KodiakError, TextInput, Transcriber,
 };
 pub use result::{
-    Affiliation, CONTACT_REPORT, Category, ContactReport, ContractError, Correction, Direction,
-    Intent, KodiakResult, MECP_REPORT, MecpReport, RESULT_SCHEMA, RchCommand, RejectReason,
-    Rejection,
+    Affiliation, CONTACT_REPORT, Category, ContactReport, ContractError, Coordinates, Correction,
+    Direction, Intent, KodiakResult, MECP_REPORT, MecpParameters, MecpReport, RESULT_SCHEMA,
+    RESULT_SCHEMA_V1, RchCommand, RejectReason, Rejection,
 };
 pub use wake::{DEFAULT_WAKE_FORMS, DEFAULT_WAKE_WORD, WakeWord};

@@ -11,12 +11,13 @@
 //! The words after the activation word are classified in this order:
 //!
 //! 1. A complete RCH command phrase, e.g. "list users" → `mission.users`.
-//! 2. An MECP severity word (mayday, urgent, safety, routine) → `mecp.report`.
+//! 2. An MECP severity word (mayday, urgent, safety, routine) → `mecp.report`,
+//!    with one or more event codes and any spoken structured values.
 //! 3. A contact affiliation (friendly, hostile, …) → `contact.report`.
 //!
-//! A severity together with an affiliation is ambiguous. Anything else is
-//! `no_intent`, or `missing_parameter` when an MECP event was named without
-//! a severity.
+//! A severity together with an affiliation is ambiguous. Otherwise a negation
+//! ("Kodiak don't create a marker") is `cancelled`, an MECP event without a
+//! severity is `missing_parameter`, and anything else is `no_intent`.
 //!
 //! When the engine finds no activation word, a first word that sounds like it
 //! ("Kardiac", "Podax", "Codeac") still activates, but only when the rest of
@@ -41,7 +42,7 @@ pub use text::tokenize;
 use vocabulary::VocabularyError;
 
 /// Identifier recorded in results produced by [`DeterministicClassifier`].
-pub const DETERMINISTIC_ID: &str = "deterministic/3";
+pub const DETERMINISTIC_ID: &str = "deterministic/4";
 
 /// Rule-based classifier over the embedded vocabularies.
 pub struct DeterministicClassifier {
@@ -76,10 +77,21 @@ impl DeterministicClassifier {
         let mecp = vocabulary::Mecp::parse(mecp)?;
         let contact = vocabulary::Contact::parse(contact)?;
         let rch = vocabulary::Rch::parse(rch)?;
-        let corrector = fuzzy::Corrector::new(known_words(&mecp, &contact, &rch));
+        let known = known_words(&mecp, &contact, &rch);
+        let mecp = mecp::Parser::new(mecp);
+        let contact = contact::Parser::new(contact);
+        // Grammar words are known but never a correction target: a misheard
+        // word must not become a keyword, a language or a negation.
+        let grammar: BTreeSet<String> = mecp
+            .grammar_words()
+            .chain(contact.grammar_words().cloned())
+            .collect();
+        let mut known = known;
+        known.extend(grammar.iter().cloned());
+        let corrector = fuzzy::Corrector::new(known, &grammar);
         Ok(Self {
-            mecp: mecp::Parser::new(mecp),
-            contact: contact::Parser::new(contact),
+            mecp,
+            contact,
             rch: rch::Parser::new(rch),
             corrector,
         })
@@ -115,7 +127,19 @@ impl DeterministicClassifier {
             (false, true) => self.contact.parse(tokens),
             (false, false) => {
                 let words: Vec<&str> = tokens.iter().map(|t| t.word.as_str()).collect();
-                if self.mecp.mentions_event(&words) {
+                if let Some(word) = self.mecp.uncovered_negation(&words).or_else(|| {
+                    words
+                        .iter()
+                        .copied()
+                        .find(|word| self.contact.is_negation(word))
+                        .filter(|_| !self.mecp.mentions_event(&words))
+                }) {
+                    Err(Rejection::new(
+                        RejectReason::Cancelled,
+                        None,
+                        format!("the command is negated or cancelled by {word:?}"),
+                    ))
+                } else if self.mecp.mentions_event(&words) {
                     Err(Rejection::new(
                         RejectReason::MissingParameter,
                         Some(Category::Mecp),
@@ -222,6 +246,15 @@ impl IntentClassifier for DeterministicClassifier {
         DETERMINISTIC_ID
     }
 
+    fn vocabularies(&self) -> std::collections::BTreeMap<String, String> {
+        [
+            ("mecp".to_owned(), self.mecp.release()),
+            ("contact".to_owned(), self.contact.release()),
+            ("rch".to_owned(), self.rch.release()),
+        ]
+        .into()
+    }
+
     fn classify(&self, command: &str) -> Classification {
         let tokens = self.mecp.join_severities(&tokenize(command));
         let (tokens, mut corrections) = self.corrector.correct(tokens);
@@ -247,7 +280,7 @@ impl IntentClassifier for DeterministicClassifier {
 
 #[cfg(test)]
 mod tests {
-    use kodiak_core::{Affiliation, ContactReport, Direction, MecpReport};
+    use kodiak_core::{Affiliation, ContactReport, Direction, MecpParameters, MecpReport};
 
     use super::*;
 
@@ -296,7 +329,6 @@ mod tests {
         assert_eq!(reason("what a lovely day"), RejectReason::NoIntent);
         assert_eq!(reason("need food"), RejectReason::MissingParameter);
         assert_eq!(reason("urgent"), RejectReason::MissingParameter);
-        assert_eq!(reason("urgent food and water"), RejectReason::Ambiguous);
         assert_eq!(reason("urgent hostile"), RejectReason::Ambiguous);
         assert_eq!(
             reason("hostile two hundred meters"),
@@ -316,11 +348,11 @@ mod tests {
         );
         assert_eq!(
             reason("hostile three o'clock bearing 270 200 meters"),
-            RejectReason::Ambiguous
+            RejectReason::Contradictory
         );
         assert_eq!(
             reason("hostile friendly three o'clock 200 meters"),
-            RejectReason::Ambiguous
+            RejectReason::Contradictory
         );
         assert_eq!(
             reason("hostile three o'clock 200 meters banana"),
@@ -330,6 +362,218 @@ mod tests {
         assert_eq!(reason("search library for"), RejectReason::MissingParameter);
         assert_eq!(reason("time remaining now"), RejectReason::NoIntent);
         assert_eq!(reason("list users now"), RejectReason::NoIntent);
+    }
+
+    fn contact(text: &str) -> ContactReport {
+        match classify(text) {
+            Ok(Intent::ContactReport(report)) => report,
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+
+    fn parameters(text: &str) -> MecpParameters {
+        match classify(text) {
+            Ok(Intent::MecpReport(report)) => report.parameters,
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn several_events_keep_their_spoken_order() {
+        assert_eq!(
+            mecp("mayday injured, broken leg, need water."),
+            "MECP/0/M01 M07 S01"
+        );
+        assert_eq!(mecp("urgent road blocked bridge out"), "MECP/1/T01 T02");
+        assert_eq!(mecp("urgent food and water"), "MECP/1/S02 S01");
+        // A repeated event is reported once.
+        assert_eq!(mecp("mayday need water, water!"), "MECP/0/S01");
+        // Phrases that cross: "need water" (S01) or "water rescue" (T11)?
+        assert_eq!(reason("mayday need water rescue"), RejectReason::Ambiguous);
+        // Events that exclude each other.
+        assert_eq!(
+            reason("urgent need water we have water"),
+            RejectReason::Contradictory
+        );
+        assert_eq!(
+            reason("urgent mayday bleeding"),
+            RejectReason::Contradictory
+        );
+    }
+
+    #[test]
+    fn spoken_parameters_are_encoded_in_canonical_order() {
+        assert_eq!(mecp("mayday injured three people"), "MECP/0/M01 3pax");
+        assert_eq!(mecp("routine have space for five"), "MECP/3/H07 5pax");
+        assert_eq!(mecp("routine eta twenty minutes"), "MECP/3/R03 20");
+        assert_eq!(mecp("routine eta one hour"), "MECP/3/R03 60");
+        assert_eq!(
+            mecp("urgent stranded 45.5017, -73.5673"),
+            "MECP/1/P01 45.5017,-73.5673"
+        );
+        assert_eq!(
+            mecp("urgent stranded forty five point five minus seventy three point two five"),
+            "MECP/1/P01 45.5,-73.25"
+        );
+        assert_eq!(
+            mecp("mayday injured callsign bravo six time fourteen thirty language french"),
+            "MECP/0/M01 @fr @1430 ~BRAVO-6"
+        );
+        assert_eq!(
+            mecp("safety road blocked reference alpha one two details north gate by the Barn"),
+            "MECP/2/T01 #ALPHA-12 north gate by the Barn"
+        );
+        assert_eq!(mecp("urgent fire 0930 zulu"), "MECP/1/T07 @0930");
+        assert_eq!(
+            mecp("routine eta estimated time of arrival 15"),
+            "MECP/3/R03 15"
+        );
+        let spoken = parameters("mayday injured four people");
+        assert_eq!(spoken.pax, Some(4));
+        assert_eq!(spoken.coordinates, None, "never filled in from metadata");
+    }
+
+    #[test]
+    fn invalid_or_incomplete_parameters_are_rejected() {
+        assert_eq!(
+            reason("mayday injured callsign"),
+            RejectReason::MissingParameter
+        );
+        assert_eq!(
+            reason("mayday injured language klingon"),
+            RejectReason::InvalidParameter
+        );
+        assert_eq!(
+            reason("mayday injured time 2575"),
+            RejectReason::InvalidParameter
+        );
+        assert_eq!(
+            reason("mayday injured 0 people"),
+            RejectReason::InvalidParameter
+        );
+        assert_eq!(
+            reason("urgent stranded 95.5 10.5"),
+            RejectReason::InvalidParameter
+        );
+        assert_eq!(
+            reason("mayday injured three people four people"),
+            RejectReason::Contradictory
+        );
+        // R03 and H07 both take a bare number.
+        assert_eq!(
+            reason("routine eta have space for 5"),
+            RejectReason::Ambiguous
+        );
+        // More than 200 bytes on the wire.
+        let long = format!("mayday injured details {}", "very long words ".repeat(14));
+        assert_eq!(reason(&long), RejectReason::InvalidParameter);
+    }
+
+    #[test]
+    fn negations_cancel_commands() {
+        assert_eq!(reason("don't create a marker"), RejectReason::Cancelled);
+        assert_eq!(reason("mayday don't need water"), RejectReason::Cancelled);
+        assert_eq!(
+            reason("hostile 300 meters 6 o'clock no"),
+            RejectReason::Cancelled
+        );
+        assert_eq!(reason("cancel"), RejectReason::Cancelled);
+        // Negations inside event phrases are events.
+        assert_eq!(mecp("mayday not breathing"), "MECP/0/M03");
+        assert_eq!(mecp("urgent no water"), "MECP/1/S01");
+        assert_eq!(mecp("routine cancel beacon"), "MECP/3/B03");
+        assert_eq!(reason("cancel beacon"), RejectReason::MissingParameter);
+    }
+
+    #[test]
+    fn ddd_contact_reports() {
+        let report = contact("hostile, 300 meters, 6 o'clock.");
+        assert_eq!(report.affiliation, Affiliation::Hostile);
+        assert_eq!(report.distance_m, 300);
+        assert_eq!(
+            report.direction,
+            Direction::RelativeClock {
+                relative_bearing_deg: 180
+            }
+        );
+        let report = contact("hostile, two vehicles, 500 meters, 3 o'clock, moving north.");
+        assert_eq!(report.classification.as_deref(), Some("vehicle"));
+        assert_eq!(report.quantity, Some(2));
+        assert_eq!(report.activity.as_deref(), Some("moving north"));
+        assert_eq!(
+            report.direction,
+            Direction::RelativeClock {
+                relative_bearing_deg: 90
+            }
+        );
+        for (text, metres) in [
+            ("friendly three hundred meters 12 o'clock", 300),
+            ("friendly 300 meters 12 o'clock", 300),
+            ("friendly half a kilometer 12 o'clock", 500),
+            ("friendly one kilometer 12 o'clock", 1000),
+            ("friendly a kilometer 12 o'clock", 1000),
+            ("friendly quarter of a klick 12 o'clock", 250),
+        ] {
+            assert_eq!(contact(text).distance_m, metres, "{text}");
+        }
+        for (clock, degrees) in [
+            ("12 o'clock", 0),
+            ("3 o'clock", 90),
+            ("6 o'clock", 180),
+            ("9 o'clock", 270),
+            ("3:30", 105),
+            ("half past ten", 315),
+        ] {
+            assert_eq!(
+                contact(&format!("unknown 100 m {clock}")).direction,
+                Direction::RelativeClock {
+                    relative_bearing_deg: degrees
+                },
+                "{clock}"
+            );
+        }
+        for (bearing, degrees) in [
+            ("bearing 270", 270),
+            ("270 degrees", 270),
+            ("northeast", 45),
+            ("north east", 45),
+        ] {
+            assert_eq!(
+                contact(&format!("suspect 100 m {bearing}")).direction,
+                Direction::CompassBearing {
+                    bearing_deg: degrees
+                },
+                "{bearing}"
+            );
+        }
+        assert_eq!(
+            reason("hostile 0 meters 6 o'clock"),
+            RejectReason::InvalidParameter
+        );
+        assert_eq!(
+            reason("hostile 200 kilometers 6 o'clock"),
+            RejectReason::InvalidParameter
+        );
+        assert_eq!(
+            reason("hostile 300 meters 6 o'clock 9 o'clock"),
+            RejectReason::Contradictory
+        );
+        assert_eq!(
+            reason("hostile 300 meters 500 meters 6 o'clock"),
+            RejectReason::Contradictory
+        );
+        assert_eq!(
+            reason("hostile 13 o'clock 300 meters"),
+            RejectReason::InvalidParameter
+        );
+    }
+
+    #[test]
+    fn vocabulary_versions_are_recorded() {
+        let versions = DeterministicClassifier::new().vocabularies();
+        assert_eq!(versions["mecp"], "1.2");
+        assert_eq!(versions["contact"], "1.2");
+        assert_eq!(versions["rch"], "1.1");
     }
 
     #[test]
@@ -345,6 +589,11 @@ mod tests {
         assert_eq!(addressed.command, " urgent need food.");
         let addressed = rules.addressed("Podax, mayday, meet water.").unwrap();
         assert_eq!(addressed.heard.as_deref(), Some("Podax"));
+        let addressed = rules.addressed("Kodiaks mayday meet water").unwrap();
+        assert_eq!(addressed.heard.as_deref(), Some("Kodiaks"));
+        // "Kodiaks" before an incomplete command stays chat.
+        assert_eq!(rules.addressed("Kodiaks hostile 300 meters"), None);
+        assert_eq!(rules.addressed("The Kodiaks need water"), None);
         for chat in [
             "I think we need water.",
             "Cardiac arrest is a medical term",

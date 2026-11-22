@@ -25,6 +25,9 @@ pub struct Kodiak {
     /// report GPS course over ground instead, so this is off by default and
     /// clock-direction contact reports are then ignored.
     pub bss_heading_is_compass: bool,
+    /// Oldest stored fix a contact marker may use when the transmission
+    /// itself carried no position, in seconds.
+    pub marker_max_fix_age_s: u64,
     /// Which intent classifier reads commands.
     pub classifier: Classifier,
     /// laya checkpoint directory, relative to the configuration file.
@@ -51,6 +54,7 @@ impl Default for Kodiak {
                 .map(|form| (*form).to_owned())
                 .collect(),
             bss_heading_is_compass: false,
+            marker_max_fix_age_s: 300,
             classifier: Classifier::Deterministic,
             laya_checkpoint: PathBuf::from("models/laya/english"),
             laya_threshold: 0.85,

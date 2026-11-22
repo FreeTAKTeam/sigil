@@ -5,7 +5,11 @@
 //!
 //! - Chat is sent as an ordinary LXMF chat message.
 //! - MECP reports become an RCH mission log entry
-//!   (`mission.registry.log_entry.upsert`) with the radio's position appended.
+//!   (`mission.registry.log_entry.upsert`). Kodiak's report carries only what
+//!   the operator spoke. When the operator spoke no coordinates, Sigil adds
+//!   the radio's own position as the MECP coordinates token; spoken
+//!   coordinates are never replaced. The message must stay within the MECP
+//!   200-byte limit.
 //! - Contact reports become an RCH map marker (`mission.marker.create`) at the
 //!   computed contact position.
 //! - RCH commands are sent unchanged as RCH field commands from the radio's
@@ -14,15 +18,20 @@
 //!
 //! Position rule: use the GPS fix from this transmission's BSS packet,
 //! otherwise the radio's last valid fix. With no fix ever received, MECP and
-//! contact reports are ignored locally. Clock directions need a verified
-//! compass heading; the BSS heading counts only when the operator configures
-//! it as a compass heading.
+//! contact reports are ignored locally. A contact marker also ignores a last
+//! fix older than the configured age, since the operator may have moved.
+//!
+//! Heading rule: clock directions need a verified compass heading from this
+//! transmission's own BSS packet. The BSS heading counts only when the
+//! operator configures it as a compass heading, and a stored heading is never
+//! used because the operator may have turned since.
 
 use std::fmt::Write as _;
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
-use kodiak_core::{Affiliation, ContactReport, Direction, Intent, KodiakResult};
+use kodiak_core::mecp::MAX_MESSAGE_BYTES;
+use kodiak_core::{Affiliation, ContactReport, Direction, Intent, KodiakResult, MecpReport};
 use lxmf_core::constants::FIELD_COMMANDS;
 use rns_transport::hash::AddressHash;
 use serde_json::{Value, json};
@@ -54,17 +63,40 @@ pub struct Context<'a> {
     pub timestamp: DateTime<Utc>,
     /// Fix carried by this transmission's BSS packet.
     pub current: Option<Position>,
-    /// The radio's last valid fix from the identity registry.
-    pub last_known: Option<Position>,
+    /// The radio's last valid fix from the identity registry, with the
+    /// time it was received.
+    pub last_known: Option<(Position, DateTime<Utc>)>,
     /// Whether the BSS heading is a verified compass heading.
     pub heading_is_compass: bool,
+    /// Oldest last-known fix a contact marker may use, in seconds.
+    pub marker_max_fix_age_s: u64,
     pub send_chat: bool,
     pub send_intents: bool,
 }
 
 impl Context<'_> {
     fn position(&self) -> Option<Position> {
-        self.current.or(self.last_known)
+        self.current
+            .or(self.last_known.map(|(position, _)| position))
+    }
+
+    /// The observer's position for a contact marker: the current fix, or a
+    /// last fix no older than the configured age.
+    fn marker_position(&self) -> std::result::Result<Position, String> {
+        if let Some(current) = self.current {
+            return Ok(current);
+        }
+        let Some((position, received_at)) = self.last_known else {
+            return Err("no valid GPS position has been received from this radio".into());
+        };
+        let age = (self.timestamp - received_at).num_seconds();
+        let limit = i64::try_from(self.marker_max_fix_age_s).unwrap_or(i64::MAX);
+        if age > limit {
+            return Err(format!(
+                "this transmission carried no position and the radio's last fix is {age} s old (limit {limit} s)"
+            ));
+        }
+        Ok(position)
     }
 
     fn chat(&self, text: &str) -> Plan {
@@ -99,13 +131,20 @@ pub fn plan(text: &str, result: Option<&KodiakResult>, context: &Context<'_>) ->
     };
     match intent {
         Intent::MecpReport(report) => {
-            let Some(position) = context.position() else {
-                return Ok(no_position());
+            let log_entry = if report.has_spoken_coordinates() {
+                report.content.clone()
+            } else {
+                let Some(position) = context.position() else {
+                    return Ok(no_position());
+                };
+                with_position(report, position)
             };
-            let log_entry = format!(
-                "{} {:.6},{:.6}",
-                report.content, position.latitude, position.longitude
-            );
+            if log_entry.len() > MAX_MESSAGE_BYTES {
+                return Ok(Plan::Ignore(format!(
+                    "the MECP report with the radio's position is {} bytes; MECP allows {MAX_MESSAGE_BYTES}",
+                    log_entry.len()
+                )));
+            }
             let fields = command_fields(
                 "mission.registry.log_entry.upsert",
                 &json!({ "content": log_entry }),
@@ -135,9 +174,28 @@ fn no_position() -> Plan {
     Plan::Ignore("no valid GPS position has been received from this radio".into())
 }
 
+/// The MECP message with the radio's position as its coordinates token, in
+/// the canonical place after the codes and person count. A report with no
+/// spoken values keeps the version 1 form, `MECP/1/S02 40.000000,-75.000000`.
+fn with_position(report: &MecpReport, position: Position) -> String {
+    let mut head = format!("MECP/{}/{}", report.severity, report.codes.join(" "));
+    if let Some(pax) = report.parameters.pax {
+        let _ = write!(head, " {pax}pax");
+    }
+    let tail = report
+        .content
+        .strip_prefix(head.as_str())
+        .unwrap_or_default();
+    format!(
+        "{head} {:.6},{:.6}{tail}",
+        position.latitude, position.longitude
+    )
+}
+
 fn contact(report: &ContactReport, text: &str, context: &Context<'_>) -> Result<Plan> {
-    let Some(observer) = context.position() else {
-        return Ok(no_position());
+    let observer = match context.marker_position() {
+        Ok(observer) => observer,
+        Err(reason) => return Ok(Plan::Ignore(reason)),
     };
     let bearing = match report.direction {
         Direction::CompassBearing { bearing_deg } => bearing_deg,
@@ -149,8 +207,15 @@ fn contact(report: &ContactReport, text: &str, context: &Context<'_>) -> Result<
                     "a clock direction needs a verified compass heading; the BSS heading is not configured as one".into(),
                 ));
             }
-            let Some(heading) = observer.heading_deg.filter(|heading| *heading <= 360) else {
-                return Ok(Plan::Ignore("the radio reported no compass heading".into()));
+            let Some(current) = context.current else {
+                return Ok(Plan::Ignore(
+                    "a clock direction needs the heading from this transmission; a stored heading may be stale".into(),
+                ));
+            };
+            let Some(heading) = current.heading_deg.filter(|heading| *heading < 360) else {
+                return Ok(Plan::Ignore(
+                    "this transmission carried no valid compass heading".into(),
+                ));
             };
             (heading + relative_bearing_deg) % 360
         }
@@ -234,11 +299,15 @@ pub fn command_fields(command_type: &str, args: &Value, command_id: &str) -> Res
 mod tests {
     use std::collections::BTreeMap;
 
-    use kodiak_core::{MecpReport, RchCommand, RejectReason, Rejection};
+    use kodiak_core::{Coordinates, MecpParameters, RchCommand, RejectReason, Rejection};
 
     use super::*;
 
     const ID: &str = "voice-20261121T100000Z-42";
+
+    fn now() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_800_000_000, 0).unwrap()
+    }
 
     fn context(
         current: Option<Position>,
@@ -249,12 +318,21 @@ mod tests {
             radio_name: "R4",
             event_id: ID,
             frequency_hz: 435_995_000,
-            timestamp: DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+            timestamp: now(),
             current,
-            last_known,
+            // Received a minute before the transmission.
+            last_known: last_known.map(|fix| (fix, now() - chrono::Duration::seconds(60))),
             heading_is_compass: compass,
+            marker_max_fix_age_s: 300,
             send_chat: true,
             send_intents: true,
+        }
+    }
+
+    fn ignored(plan: &Plan) -> &str {
+        match plan {
+            Plan::Ignore(reason) => reason,
+            other => panic!("expected Ignore, got {other:?}"),
         }
     }
 
@@ -275,6 +353,7 @@ mod tests {
             classifier: "test/1".into(),
             corrections: Vec::new(),
             confidence: None,
+            vocabularies: std::collections::BTreeMap::new(),
         }
     }
 
@@ -326,6 +405,7 @@ mod tests {
             classifier: "test/1".into(),
             corrections: Vec::new(),
             confidence: None,
+            vocabularies: std::collections::BTreeMap::new(),
         };
         assert!(matches!(
             plan("Kodiak launch", Some(&rejected), &ctx).unwrap(),
@@ -335,11 +415,7 @@ mod tests {
 
     #[test]
     fn mecp_uses_current_then_last_fix_and_never_invents_one() {
-        let report = intent(Intent::MecpReport(MecpReport {
-            severity: 1,
-            code: "S02".into(),
-            content: "MECP/1/S02".into(),
-        }));
+        let report = intent(Intent::MecpReport(MecpReport::single(1, "S02").unwrap()));
         let current = Some(fix(40.0, -75.0, None));
         let last = Some(fix(41.0, -74.0, None));
         let entry = command(&plan("", Some(&report), &context(current, last, false)).unwrap());
@@ -350,6 +426,74 @@ mod tests {
         assert_eq!(entry["args"]["content"], "MECP/1/S02 41.000000,-74.000000");
         assert!(matches!(
             plan("", Some(&report), &context(None, None, false)).unwrap(),
+            Plan::Ignore(_)
+        ));
+    }
+
+    #[test]
+    fn multi_code_mecp_keeps_spoken_values_and_adds_telemetry_in_place() {
+        let fix = Some(fix(40.0, -75.0, None));
+        let spoken = |parameters: MecpParameters| {
+            intent(Intent::MecpReport(
+                MecpReport::encode(0, vec!["M01".into(), "S01".into()], parameters).unwrap(),
+            ))
+        };
+        // Telemetry goes after the codes and person count.
+        let report = spoken(MecpParameters {
+            pax: Some(3),
+            callsign: Some("BRAVO-6".into()),
+            ..MecpParameters::default()
+        });
+        let entry = command(&plan("", Some(&report), &context(fix, None, false)).unwrap());
+        assert_eq!(
+            entry["args"]["content"],
+            "MECP/0/M01 S01 3pax 40.000000,-75.000000 ~BRAVO-6"
+        );
+        // Spoken coordinates are sent as spoken, even with no fix at all.
+        let report = spoken(MecpParameters {
+            coordinates: Some(Coordinates {
+                latitude: 45.5,
+                longitude: -73.25,
+            }),
+            ..MecpParameters::default()
+        });
+        let entry = command(&plan("", Some(&report), &context(None, None, false)).unwrap());
+        assert_eq!(entry["args"]["content"], "MECP/0/M01 S01 45.5,-73.25");
+        // Over 200 bytes once the position is added: not sent.
+        let report = spoken(MecpParameters {
+            text: Some("x".repeat(170)),
+            ..MecpParameters::default()
+        });
+        assert!(
+            ignored(&plan("", Some(&report), &context(fix, None, false)).unwrap()).contains("200")
+        );
+    }
+
+    #[test]
+    fn markers_refuse_untrusted_position_or_heading() {
+        let clock = contact_report(Direction::RelativeClock {
+            relative_bearing_deg: 90,
+        });
+        let bearing = contact_report(Direction::CompassBearing { bearing_deg: 90 });
+        // No fix in this transmission: a stored heading is never used.
+        let stored = Some(fix(0.0, 0.0, Some(0)));
+        assert!(
+            ignored(&plan("", Some(&clock), &context(None, stored, true)).unwrap())
+                .contains("stale")
+        );
+        // A recent stored fix is enough for an absolute bearing.
+        assert!(matches!(
+            plan("", Some(&bearing), &context(None, stored, false)).unwrap(),
+            Plan::Command { .. }
+        ));
+        // A stale stored fix is not.
+        let mut old = context(None, stored, false);
+        old.last_known = stored.map(|f| (f, now() - chrono::Duration::seconds(301)));
+        assert!(ignored(&plan("", Some(&bearing), &old).unwrap()).contains("301 s old"));
+        // An invalid heading is refused.
+        let bad = Some(fix(0.0, 0.0, Some(360)));
+        assert!(matches!(
+            plan("", Some(&clock), &context(bad, None, true)).unwrap(),
             Plan::Ignore(_)
         ));
     }

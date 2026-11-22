@@ -1,4 +1,11 @@
-//! Contact report extraction.
+//! Contact report extraction: Description, Distance, Direction (DDD).
+//!
+//! The words may come in any order. A report needs an affiliation, one
+//! distance and one direction; classification, quantity and activity are
+//! optional. Two different values for one of them make the report
+//! contradictory, and any negation word cancels it. Clock positions are
+//! relative to the operator's heading; compass points and bearings are
+//! absolute. Kodiak never turns one into the other.
 
 use kodiak_core::{
     Affiliation, Category, ContactReport, Direction, Intent, RejectReason, Rejection,
@@ -18,8 +25,8 @@ fn reject(reason: RejectReason, detail: impl Into<String>) -> Rejection {
 fn set<T: PartialEq>(slot: &mut Option<T>, value: T, what: &str) -> Result<(), Rejection> {
     match slot {
         Some(existing) if *existing != value => Err(reject(
-            RejectReason::Ambiguous,
-            format!("more than one {what}"),
+            RejectReason::Contradictory,
+            format!("two different values for the {what}"),
         )),
         _ => {
             *slot = Some(value);
@@ -72,6 +79,40 @@ fn whole(value: f64, low: f64, high: f64) -> Option<u32> {
 impl Parser {
     pub fn new(vocabulary: Contact) -> Self {
         Self { vocabulary }
+    }
+
+    /// `version.revision` of the vocabulary.
+    pub fn release(&self) -> String {
+        self.vocabulary.release()
+    }
+
+    /// Whether a word cancels a report.
+    pub fn is_negation(&self, word: &str) -> bool {
+        self.vocabulary.negations.contains(word)
+    }
+
+    /// Every word of the vocabulary added in revision 2.
+    pub fn grammar_words(&self) -> impl Iterator<Item = &String> {
+        self.vocabulary
+            .negations
+            .iter()
+            .chain(&self.vocabulary.degree_words)
+            .chain(self.vocabulary.fractions.keys())
+    }
+
+    /// "half a kilometer", "quarter of a klick", "half km": the distance in
+    /// metres and the words used.
+    fn fraction(&self, words: &[&str]) -> Option<(f64, usize)> {
+        let fraction = self.vocabulary.fractions.get(*words.first()?)?;
+        let mut used = 1;
+        if words.get(used) == Some(&"of") {
+            used += 1;
+        }
+        if matches!(words.get(used), Some(&("a" | "an"))) {
+            used += 1;
+        }
+        let unit = self.unit(words.get(used))?;
+        Some((fraction * unit, used + 1))
     }
 
     pub fn affiliation(&self, word: &str) -> Option<Affiliation> {
@@ -142,6 +183,12 @@ impl Parser {
     pub fn parse(&self, tokens: &[Token]) -> Result<Intent, Rejection> {
         let words: Vec<&str> = tokens.iter().map(|token| token.word.as_str()).collect();
         let vocabulary = &self.vocabulary;
+        if let Some(word) = words.iter().find(|word| self.is_negation(word)) {
+            return Err(reject(
+                RejectReason::Cancelled,
+                format!("the contact report is negated or cancelled by {word:?}"),
+            ));
+        }
         let mut affiliation = None;
         let mut clock_position: Option<(u16, u16)> = None;
         let mut bearing: Option<u16> = None;
@@ -192,6 +239,15 @@ impl Parser {
             } else if let Some((degrees, used)) = self.compass_point(rest) {
                 set(&mut bearing, degrees, "bearing")?;
                 index += used;
+            } else if let Some((metres, used)) = self.fraction(rest) {
+                set(&mut distance, self.distance(metres, 1.0)?, "distance")?;
+                index += used;
+            } else if matches!(word, "a" | "an")
+                && let Some(unit) = self.unit(rest.get(1))
+            {
+                // "a kilometer"
+                set(&mut distance, self.distance(1.0, unit)?, "distance")?;
+                index += 2;
             } else if word.contains(':') || word == "half" {
                 let (hour, minutes, used) = clock(rest).ok_or_else(|| {
                     reject(
@@ -257,6 +313,22 @@ impl Parser {
                     index += length + 1;
                     continue;
                 }
+                // Compass bearing: "270 degrees", "two seven zero degrees".
+                if let Some((value, length)) = Self::bearing(rest)
+                    && rest
+                        .get(length)
+                        .is_some_and(|w| vocabulary.degree_words.contains(*w))
+                {
+                    let degrees = whole(value, 0.0, 359.0).ok_or_else(|| {
+                        reject(
+                            RejectReason::InvalidParameter,
+                            "bearing must be 0-359 degrees",
+                        )
+                    })?;
+                    set(&mut bearing, u16::try_from(degrees).unwrap_or(0), "bearing")?;
+                    index += length + 1;
+                    continue;
+                }
                 // Otherwise a clock position.
                 if let Some((hour, minutes, used)) = clock(rest) {
                     set(&mut clock_position, (hour, minutes), "clock position")?;
@@ -286,7 +358,7 @@ impl Parser {
         let direction = match (clock_position, bearing) {
             (Some(_), Some(_)) => {
                 return Err(reject(
-                    RejectReason::Ambiguous,
+                    RejectReason::Contradictory,
                     "both a clock position and a compass bearing",
                 ));
             }

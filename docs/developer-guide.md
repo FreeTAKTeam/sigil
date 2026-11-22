@@ -188,7 +188,7 @@ Leading IDs (BSS sent on PTT press) are deliberately not used.
 
 | File | Schema | Written by |
 |---|---|---|
-| `<ts>_<hz>_<rand>.json` (+ `.wav`) | Plain transcript: `started_at`, `ended_at`, `transcribed_at`, `frequency_hz`, `source`, `audio_duration_ms`, `text`, `audio_file?`, `kodiak` (the `kodiak.result.v1` result) | Every transcribed clip (`Output::transcribe`) |
+| `<ts>_<hz>_<rand>.json` (+ `.wav`) | Plain transcript: `started_at`, `ended_at`, `transcribed_at`, `frequency_hz`, `source`, `audio_duration_ms`, `text`, `audio_file?`, `kodiak` (the `kodiak.result.v2` result) | Every transcribed clip (`Output::transcribe`) |
 | `bss_*.json` | `sdr.bss.v1`: `protocol`, `timestamp`, `frequency_hz`, `source`, `audio_sample_offset`, `sample_rate_hz`, `payload_hex`, plus the parsed packet fields | Each new verified BSS packet |
 | `bss-diagnostic_*.json` | `sdr.bss.diagnostic.v1`: `error`, `hdlc_bits`, … | Rejected candidates with `--bss-diagnostics` |
 | `gateway_*.json` | `sdr.gateway.v1`: `id`, `timestamp`, `frequency_hz`, `source`, `kind`, plus kind-specific fields | Coordinator (see below) |
@@ -225,6 +225,7 @@ In `listen`, the coordinator writes `gateway_*.json` even without `--config` or 
 | `[rch].send_chat`, `[rch].send_telemetry`, `[rch].send_intents` | `true`, `true`, `true` | At least one must be `true`. `send_intents` publishes Kodiak MECP reports, contact markers and RCH commands. |
 | `[kodiak].wake_words` | `kodiak` plus the observed recognizer spellings | Accepted spellings of the activation word |
 | `[kodiak].bss_heading_is_compass` | `false` | Treat the BSS heading as a verified compass heading. It is required for clock-direction contact reports. |
+| `[kodiak].marker_max_fix_age_s` | `300` | Oldest stored fix a contact marker may use when its transmission carried no position |
 
 ## Identity registry (`identity.rs`)
 

@@ -32,29 +32,37 @@ Text-only use needs only `kodiak-core` and `kodiak-intent`, and loads no speech 
 
 The API is synchronous. Recognition and classification are CPU-bound and Sigil runs them on its ASR worker thread; async callers should use a blocking thread pool.
 
-## Result contract `kodiak.result.v1`
+## Result contract `kodiak.result.v2`
 
-Every result carries `"schema": "kodiak.result.v1"` and a `type`.
+Every result carries `"schema": "kodiak.result.v2"` and a `type`. Intents and rejections also record the classifier and the version of each vocabulary it used (`"vocabularies":{"contact":"1.2","mecp":"1.2","rch":"1.1"}`, omitted below).
 
 ```json
-{"schema":"kodiak.result.v1","type":"chat","content":"We need more food at the camp."}
+{"schema":"kodiak.result.v2","type":"chat","content":"We need more food at the camp."}
 
-{"schema":"kodiak.result.v1","type":"intent","category":"mecp","intent":"mecp.report",
- "data":{"severity":1,"code":"S02","content":"MECP/1/S02"},
- "transcript":"Kodiak. Urgent. Need Food.","classifier":"deterministic/3"}
+{"schema":"kodiak.result.v2","type":"intent","category":"mecp","intent":"mecp.report",
+ "data":{"severity":1,"code":"S02","codes":["S02"],"content":"MECP/1/S02"},
+ "transcript":"Kodiak. Urgent. Need Food.","classifier":"deterministic/4"}
 
-{"schema":"kodiak.result.v1","type":"intent","category":"marker","intent":"contact.report",
- "data":{"affiliation":"hostile","direction_type":"relative_clock","relative_bearing_deg":105,"distance_m":200},
- "transcript":"Kodiak hostile three thirty two hundred meters.","classifier":"deterministic/3"}
+{"schema":"kodiak.result.v2","type":"intent","category":"mecp","intent":"mecp.report",
+ "data":{"severity":0,"code":"P01","codes":["P01","M01"],"content":"MECP/0/P01 M01 4pax @1430",
+         "parameters":{"pax":4,"timestamp":"1430"}},
+ "transcript":"Kodiak mayday trapped, injured, four people, time 1430 hours.","classifier":"deterministic/4"}
 
-{"schema":"kodiak.result.v1","type":"intent","category":"rch","intent":"mission.users","data":{},
- "transcript":"Kodiak list users.","classifier":"deterministic/3"}
+{"schema":"kodiak.result.v2","type":"intent","category":"marker","intent":"contact.report",
+ "data":{"affiliation":"hostile","direction_type":"relative_clock","relative_bearing_deg":180,"distance_m":300},
+ "transcript":"Kodiak hostile, 300 meters, 6 o'clock.","classifier":"deterministic/4"}
 
-{"schema":"kodiak.result.v1","type":"rejected","reason":"no_intent","detail":"no intent recognized",
- "transcript":"Kodiak launch the missiles","classifier":"deterministic/3"}
+{"schema":"kodiak.result.v2","type":"intent","category":"rch","intent":"mission.users","data":{},
+ "transcript":"Kodiak list users.","classifier":"deterministic/4"}
+
+{"schema":"kodiak.result.v2","type":"rejected","category":"marker","reason":"cancelled",
+ "detail":"the contact report is negated or cancelled by \"no\"",
+ "transcript":"Kodiak hostile 300 meters 6 o'clock, no, cancel","classifier":"deterministic/4"}
 ```
 
-- **Rejection reasons:** `no_intent`, `ambiguous`, `missing_parameter`, `invalid_parameter` and `unsupported_command`.
+- **Changes from `kodiak.result.v1`:** additions only. MECP `data` gains `codes` (every event, in spoken order; `code` stays the first one) and `parameters`; rejections gain the reasons `contradictory` and `cancelled`; results gain `vocabularies`. Version 1 documents still decode (a v1 report becomes `codes: [code]`); results are always written as version 2.
+- **Rejection reasons:** `no_intent` (unrecognized command), `missing_parameter`, `ambiguous` (more than one reading), `invalid_parameter` (a value outside the vocabulary or the protocol limits), `contradictory` (two values for one thing, or events that exclude each other), `cancelled` (a negation such as "don't", "no" or "cancel") and `unsupported_command`. A rejection is never executable.
+- **MECP parameters:** only values the operator spoke: `pax`, `coordinates` (`latitude`, `longitude`), `references`, `eta_minutes`, `language`, `timestamp` (`HHMM`), `callsign` and `text`. Kodiak never fills one in; metadata such as the radio's own position is added by the caller, outside the result.
 - **Contact directions:** a contact report has either `direction_type: relative_clock` with `relative_bearing_deg` (12 o'clock is 0°, and half hours add 15°), or `direction_type: compass_bearing` with `bearing_deg`.
 - **Optional contact fields:** `classification`, `quantity` and `activity`.
 - **Corrections:** an intent or rejection lists every transcribed word that was read as a different vocabulary word, for example `"corrections":[{"heard":"meet","read_as":"need"}]`. The field is omitted when every word matched exactly.
@@ -62,28 +70,36 @@ Every result carries `"schema": "kodiak.result.v1"` and a `type`.
 - **Misheard activation word:** a classifier may judge that a transcript without the activation word still addresses Kodiak (`IntentClassifier::addressed`). The removed word is then listed first in `corrections`, read as `kodiak`. `deterministic/3` accepts a first word within edit distance 3 of "kodiak" (4 letters or more, such as "Kardiac", "Podax" or "Codeac"), but only when the rest of the transcript is a recognized command; otherwise the transcript stays chat.
 - **Strict decoding:** an unknown schema version, or an intent whose category doesn't match, fails to decode.
 
-## Vocabularies (version 1)
+## Vocabularies (schema version 1)
 
-The vocabulary files are in `crates/kodiak-intent/vocabularies/`, embedded at compile time and validated when loaded.
+The vocabulary files are in `crates/kodiak-intent/vocabularies/`, embedded at compile time and validated when loaded. Each file has a schema `version` and a content `revision`; results record them as `version.revision`. Loading fails on an unknown field, a phrase claimed by two codes, an alias repeated in one list, a word with two roles (for example a filler that is also a negation), a parameter keyword or language name that is also an event phrase, a conflict naming an unknown code, or an alias that is not lower case.
 
-- **MECP (`mecp/v1.toml`).**
+- **MECP (`mecp/v1.toml`, revision 2).**
   - Contains the 4 severities and all 108 event codes shared by REM (`apps/mobile/src/utils/mecp.ts`) and RCH (`crates/r3akt-profile-rch/src/lib.rs`).
   - Kodiak adds only spoken phrases; it doesn't redefine any code.
-  - A report needs exactly one severity word (mayday, urgent, safety, routine) and exactly one event. Spoken variants heard on the radio are also accepted: "may day" and "may they" for mayday, "normal" for routine.
-  - R03 accepts minutes and H07 accepts a head count, encoded as REM and RCH do (`MECP/2/R03 15`, `MECP/2/H07 12pax`).
+  - A report needs exactly one severity word (mayday, urgent, safety, routine) and one or more events. Spoken variants heard on the radio are also accepted: "may day" and "may they" for mayday, "normal" for routine.
+  - **Several events:** "mayday injured, broken leg, need water" is `MECP/0/M01 M07 S01`, in spoken order; a repeated event is sent once. The report is rejected as `ambiguous` when two event phrases cross ("need water rescue": S01 or T11), and as `contradictory` when it names events listed together under `[[conflicts]]` (need water and have water, all clear and send rescue, and so on) or two severities.
+  - **Structured values** (`[parameters]`, `[languages]`), encoded in the canonical MECP order `codes pax lat,lon #ref eta @lang @hhmm ~callsign text`:
+    - person count: "four people", "5 pax" → `4pax`; H07 also takes a bare number ("space for five");
+    - coordinates: a pair of decimal numbers, "45.5017, -73.5673" or "forty five point five minus seventy three point two five";
+    - ETA with R03: "eta twenty minutes", "eta one hour" → `20`, `60`;
+    - keyword values: "callsign bravo six" → `~BRAVO-6`, "reference alpha one" → `#ALPHA-1`, "time fourteen thirty" or "1430 zulu" → `@1430`, "language french" → `@fr`, "details north gate" → free text to the end of the transmission.
+  - A keyword value stops at a filler, a negation, another keyword or an event phrase, and has at most three words. A message over 200 bytes is rejected.
+  - **Negations:** a negation that is not part of an event phrase cancels the report ("mayday don't need water"). "not breathing", "no water" and "cancel beacon" are events.
   - B04 is left out because it exists in REM only; RCH reports it as unknown.
-- **Contact (`contact/v1.toml`).**
-  - **Affiliation:** friendly, hostile, neutral, unknown or suspect.
-  - **Direction:** a clock position (whole and half hours, spoken or written as `3:30` or `330`), a bearing (`bearing two seven zero`, `bearing 45 degrees`) or an 8-point compass direction.
-  - **Distance:** in metres or kilometres, up to 100 km.
+- **Contact (`contact/v1.toml`, revision 2).** The standard form is Description, Distance, Direction ("hostile, 300 meters, 6 o'clock"), but the parts may come in any order.
+  - **Affiliation:** friendly, hostile, neutral, unknown or suspect, kept separate from the classification.
+  - **Direction:** a clock position relative to the operator's heading (whole and half hours, spoken or written as `3:30` or `330`), or an absolute bearing: `bearing two seven zero`, `270 degrees`, or an 8-point compass direction. Absolute bearings are never turned into clock positions or the other way round.
+  - **Distance:** in metres or kilometres, including "half a kilometer", "a kilometer" and "quarter of a klick", up to `max_distance_m` (100 km). Zero, negative or two different distances are rejected.
   - **Optional details:** classification, quantity and activity (`moving north`).
+  - Two different affiliations, distances or directions are `contradictory`; any negation word cancels the report.
 - **RCH (`rch/v1.toml`).**
   - Intent names are RCH's canonical dispatcher names: `help`, `mission.join`, `mission.leave`, `mission.pause`, `mission.resume`, `mission.nick` (with `nickname`), `mission.users`, `mission.registry.mission.list`, `mission.marker.list`, `mission.events.list`, `mission.registry.eam.list`, `checklist.list.active`, `mission.time` ("mission time remaining", the latest mission) and `mission.library.list` ("list library", or "search mission library for <words>" with `search`).
   - A command must match a phrase completely.
   - The names were checked against RCH's `main` at commit `0a71f4b` (20 November 2026), which added `mission.time` (`13284db`) and `mission.library.list` (`e0dba68`).
   - A request that RCH does not provide can be listed as `[[unsupported]]` and is then rejected as `unsupported_command`. None are listed at present.
 
-Classification order: a complete RCH command phrase first, then an MECP severity word, then a contact affiliation. A severity word together with an affiliation is `ambiguous`. Any word the grammar still doesn't recognize after correction causes a rejection, never a guess.
+Classification order: a complete RCH command phrase first, then an MECP severity word, then a contact affiliation. A severity word together with an affiliation is `ambiguous`. Without either, a negation is `cancelled` ("Kodiak don't create a marker"). Any word the grammar still doesn't recognize after correction causes a rejection, never a guess.
 
 ## Fuzzy matching
 
@@ -93,8 +109,9 @@ Live NFM tests showed that the recognizer spells the same spoken command differe
 2. **Sound-aware distance.** The word is compared with every vocabulary word by edit distance. Swapping letters that sound alike over radio costs half an edit: m/n, t/d, p/b, k/g/c/q, s/z/c, f/v, and any two vowels.
 3. **One clear winner.** The word is replaced only if one vocabulary word is strictly closest, within one edit for words of up to six letters and one and a half edits for longer words.
 4. **Second chance for leftover MECP words.** A known word that no MECP phrase used may be read as an MECP filler word if it clearly sounds like one. "meet" (from the phrase "meet at") becomes "need". Fillers carry no meaning, so this can only drop a misheard word; it can never add an action.
-5. **Protected words.** Negations and cancellations (`not`, `no`, `never`, `don`, `cannot`, `cancel`, `stop`, `ignore` and others) are never corrected and never used as targets. "Kodiak mayday we don't need water anymore" is still rejected.
-6. **Audit trail.** Every replacement is listed in the result's `corrections`, saved in the transcript and gateway events, and logged by Sigil as `Kodiak read "meet" as "need"`.
+5. **Protected words.** Negations and cancellations (`not`, `no`, `never`, `don`, `cannot`, `cancel`, `stop`, `ignore` and others) are never corrected and never used as targets. "Kodiak mayday we don't need water anymore" is rejected as `cancelled`. Parameter keywords, units and language names are never targets either, so a misheard word cannot start a free-text value.
+6. **No events from corrections.** A corrected word may support a report with one event, but a report with several events is rejected as `ambiguous` if any of them rests on a corrected word. "mayday deed water" would otherwise read "deed" as "dead" and add M10.
+7. **Audit trail.** Every replacement is listed in the result's `corrections`, saved in the transcript and gateway events, and logged by Sigil as `Kodiak read "meet" as "need"`.
 
 Multi-word and plural severity spellings ("may day", "may they", "maydays") are also accepted. Free-text arguments such as a nickname or a library search keep the words as transcribed.
 
@@ -125,15 +142,36 @@ Kodiak is ready for a model without depending on one:
 | Kodiak result | Published to RCH from the radio's own LXMF identity |
 |---|---|
 | chat, or no Kodiak result | Chat message, as before (`[rch].send_chat`) |
-| `mecp.report` | Field 9 `mission.registry.log_entry.upsert`, with `content` = `MECP/<s>/<code> <lat>,<lon>` |
+| `mecp.report` | Field 9 `mission.registry.log_entry.upsert`, with `content` = the MECP message. Without spoken coordinates, Sigil inserts the radio's position after the codes and person count: `MECP/<s>/<codes> [<n>pax] <lat>,<lon> [...]`. A report with no spoken values keeps the earlier form `MECP/1/S02 40.000000,-75.000000`. Spoken coordinates are sent as spoken. Over 200 bytes with the position added, nothing is sent. |
 | `contact.report` | Field 9 `mission.marker.create` at the computed contact position, with an affiliation symbol and a repeatable `object_destination_hash` |
 | RCH command | Field 9 `{"command_type": <intent>, "args": {...}, "command_id": <event id>}`. RCH's dispatcher and authorization decide what happens. |
 | rejected | Nothing is sent. The journal records `ignored` and the reason. |
 
-- **Position rule:** the publisher uses the current BSS fix if there is one, otherwise the radio's last valid fix from the identity registry. If the radio has never sent a fix, MECP and contact reports are ignored locally. RCH commands don't need a position.
-- **Heading rule:** a clock direction is added to the radio's compass heading. BSS reports a `heading_deg` whose meaning is unverified; it may be GPS course over ground. It is used only when `[kodiak].bss_heading_is_compass = true`. Otherwise clock-direction reports are ignored locally with a logged reason. A spoken compass bearing needs only a position.
+- **Position rule:** the publisher uses the current BSS fix if there is one, otherwise the radio's last valid fix from the identity registry. If the radio has never sent a fix, MECP reports without spoken coordinates and contact reports are ignored locally. A contact marker uses a stored fix only if it is at most `[kodiak].marker_max_fix_age_s` old (default 300 s). RCH commands don't need a position.
+- **Heading rule:** a clock direction is added to the compass heading from the reporting transmission's own BSS packet; a stored heading is never used, since the operator may have turned. BSS reports a `heading_deg` whose meaning is unverified; it may be GPS course over ground. It is used only when `[kodiak].bss_heading_is_compass = true`. Otherwise clock-direction reports are ignored locally with a logged reason. A spoken compass bearing needs only a position.
+- **Spoken values versus metadata:** Kodiak's result holds only what the operator said. The radio identity (from the correlated BSS ID), position and heading come from Sigil. On the MECP wire both kinds of coordinates are the same token, so the Kodiak result in the transcript and event files is the record of which was spoken.
 - **Contact position:** computed with the great-circle destination formula on a spherical Earth.
 - **Intent switch:** `[rch].send_intents` turns intent publishing on or off. The gateway stays receive-only and sends no acknowledgement or voice feedback to the radio.
+
+## Verification (22 November 2026): multi-event MECP and DDD markers
+
+`deterministic/4` with vocabularies MECP 1.2, contact 1.2 and RCH 1.1.
+
+| Suite (`datasets/regression.v2.jsonl`) | Cases | Recorded on air | Pass |
+|---|---|---|---|
+| MECP | 46 | 15 (Parakeet v2 INT8) | 46 |
+| DDD contact reports | 17 | 0 | 17 |
+| Ordinary radio speech (chat) | 45 | 36 (Parakeet v2 INT8) | 45 |
+| RCH commands | 7 | 0 | 7 |
+
+- **Recorded evidence:** the "live" cases are Parakeet v2 INT8 transcripts of real NFM transmissions from 20 and 21 November 2026. No multi-event MECP or DDD report has been recorded on air yet; those cases are constructed and need recordings before release.
+- **Coverage tests:** every phrase of all 108 MECP codes with every severity word (408 phrases × 8 severity words, 3,264 utterances); 1,764 DDD utterances covering 7 descriptions, 6 distance forms, 7 directions, all 6 component orders and 6 punctuation styles; the 94-case evaluation set and 1,030 generated utterances.
+- **Behaviour change against `deterministic/3`:** all 196 dataset texts were run through both versions. 19 outcomes changed, each one intended: 8 new valid reports (several events, structured values, "half a kilometer") and 11 rejections with a more precise reason (`contradictory` or `cancelled` instead of `ambiguous`, `invalid_parameter` or `no_intent`). No chat or RCH outcome changed, and no rejection became executable except the new multi-event reports.
+- **Sigil:** markers are refused with a logged reason when there is no fix, when a stored fix is older than the limit, or when a clock direction has no compass heading from this transmission; MECP reports keep spoken coordinates and stay within 200 bytes.
+- **Parsing latency (text only, no ASR; `cargo run --release -p kodiak-intent --example evaluate`):** median 3 µs for chat, 8 µs for DDD, 19 µs for MECP; worst case 2.5 ms when several unknown words are compared with the whole vocabulary. Building the engine takes about 3 ms.
+- **Not verified:** the MECP v1.4.1 specification itself was not available. The encoding follows the pinned REM encoder and RCH decoder named in `mecp/v1.toml`, which agree with each other. No RCH instance has received a multi-event log entry.
+
+The workspace has 79 tests.
 
 ## Verification (21 November 2026, Windows x64)
 

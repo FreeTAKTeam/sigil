@@ -25,10 +25,10 @@
 {"text": "Kodiak safety I am OK", "expect": {"type": "intent", "data": {"content": "MECP/2/B03"}}}
 {"text": "Kodiak mayday SOS", "expect": {"type": "intent", "data": {"content": "MECP/0/B01"}}}
 {"text": "Kodiak urgent we are lost", "expect": {"type": "intent", "data": {"content": "MECP/1/P06"}}}
-{"text": "Kodiak urgent need food and water", "expect": {"type": "rejected", "category": "mecp", "reason": "ambiguous"}}
+{"text": "Kodiak urgent need food and water", "expect": {"type": "intent", "category": "mecp", "data": {"codes": ["S02", "S01"], "content": "MECP/1/S02 S01"}}}
 {"text": "Kodiak need food", "expect": {"type": "rejected", "category": "mecp", "reason": "missing_parameter"}}
 {"text": "Kodiak urgent", "expect": {"type": "rejected", "category": "mecp", "reason": "missing_parameter"}}
-{"text": "Kodiak urgent mayday bleeding", "expect": {"type": "rejected", "reason": "ambiguous"}}
+{"text": "Kodiak urgent mayday bleeding", "expect": {"type": "rejected", "reason": "contradictory"}}
 {"text": "Kodiak friendly nine o'clock 500 meters", "expect": {"type": "intent", "intent": "contact.report", "data": {"affiliation": "friendly", "direction_type": "relative_clock", "relative_bearing_deg": 270, "distance_m": 500}}}
 {"text": "Kodiak enemy twelve o'clock one point five kilometers", "expect": {"type": "intent", "data": {"affiliation": "hostile", "relative_bearing_deg": 0, "distance_m": 1500}}}
 {"text": "Kodiak hostile half past one, 300 m", "expect": {"type": "intent", "data": {"relative_bearing_deg": 45, "distance_m": 300}}}
@@ -47,8 +47,8 @@
 {"text": "Kodiak hostile 3:15 200 meters", "expect": {"type": "rejected", "reason": "invalid_parameter"}}
 {"text": "Kodiak hostile thirteen o'clock 200 meters", "expect": {"type": "rejected", "reason": "invalid_parameter"}}
 {"text": "Kodiak hostile three o'clock 500 kilometers", "expect": {"type": "rejected", "reason": "invalid_parameter"}}
-{"text": "Kodiak hostile three o'clock bearing 090 200 meters", "expect": {"type": "rejected", "reason": "ambiguous"}}
-{"text": "Kodiak hostile three o'clock 200 meters 300 meters", "expect": {"type": "rejected", "reason": "ambiguous"}}
+{"text": "Kodiak hostile three o'clock bearing 090 200 meters", "expect": {"type": "rejected", "reason": "contradictory"}}
+{"text": "Kodiak hostile three o'clock 200 meters 300 meters", "expect": {"type": "rejected", "reason": "contradictory"}}
 {"text": "Kodiak help", "expect": {"type": "intent", "category": "rch", "intent": "help", "data": {}}}
 {"text": "Kodiak, join the mission.", "expect": {"type": "intent", "intent": "mission.join"}}
 {"text": "Kodiak leave", "expect": {"type": "intent", "intent": "mission.leave"}}
@@ -88,7 +88,7 @@
 {"text": "Kodiak urgent need wader", "expect": {"type": "intent", "data": {"content": "MECP/1/S01"}, "corrections": [{"heard": "wader", "read_as": "water"}]}}
 {"text": "Kodiak hostyle three o'clock 200 meeters", "expect": {"type": "intent", "data": {"affiliation": "hostile", "relative_bearing_deg": 90, "distance_m": 200}, "corrections": [{"heard": "hostyle", "read_as": "hostile"}, {"heard": "meeters", "read_as": "meters"}]}}
 {"text": "Kodiak lisst users", "expect": {"type": "intent", "intent": "mission.users", "corrections": [{"heard": "lisst", "read_as": "list"}]}}
-{"text": "Kodiak mayday we don't need water anymore", "expect": {"type": "rejected", "category": "mecp", "reason": "invalid_parameter"}}
+{"text": "Kodiak mayday we don't need water anymore", "expect": {"type": "rejected", "category": "mecp", "reason": "cancelled"}}
 {"text": "Kodiak mayday deed water", "expect": {"type": "rejected", "reason": "ambiguous", "corrections": [{"heard": "deed", "read_as": "dead"}]}}
 {"text": "Kodiak urgent need fod", "expect": {"type": "rejected", "reason": "missing_parameter"}}
 {"text": "Kodiak call me Bravo Sicks", "expect": {"type": "intent", "intent": "mission.nick", "data": {"nickname": "Bravo Sicks"}}}

@@ -428,8 +428,12 @@ impl<'a> Publisher<'a> {
             frequency_hz: event.frequency_hz,
             timestamp: event.timestamp,
             current,
-            last_known: self.registry.last_position(id)?,
+            last_known: self
+                .registry
+                .last_fix(id)?
+                .map(|last| (last.position, last.received_at)),
             heading_is_compass: self.config.kodiak.bss_heading_is_compass,
+            marker_max_fix_age_s: self.config.kodiak.marker_max_fix_age_s,
             send_chat: self.config.rch.send_chat,
             send_intents: self.config.rch.send_intents,
         };

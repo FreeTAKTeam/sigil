@@ -1,0 +1,115 @@
+{"suite": "mecp", "source": "live", "text": "Kodiak may they need water", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S01"}}}
+{"suite": "mecp", "source": "live", "text": "Kodiak Mayday need water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S01"}}}
+{"suite": "mecp", "source": "live", "text": "Kodiak, May Day, we need the water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S01"}}}
+{"suite": "mecp", "source": "live", "text": "Kodiak mayday meet water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S01"}}}
+{"suite": "mecp", "source": "live", "text": "Kodiak Maydays need water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S01"}}}
+{"suite": "mecp", "source": "live", "text": "Kodiak Mayday needs water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S01"}}}
+{"suite": "mecp", "source": "live", "text": "Kodiak Mayday meet water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S01"}}}
+{"suite": "mecp", "source": "live", "text": "Kodiak Mayday Need Water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S01"}}}
+{"suite": "mecp", "source": "live", "text": "Kodiak May Day needs water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S01"}}}
+{"suite": "mecp", "source": "live", "text": "Podax, mayday, meet water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S01"}}}
+{"suite": "chat", "source": "live", "text": "God yeah. May they need water.", "expect": {"type": "chat"}, "note": "operator meant MECP/0/S01; rules keep it as chat (laya-only recovery)"}
+{"suite": "mecp", "source": "live", "text": "Kodiak, may they need food", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S02"}}}
+{"suite": "mecp", "source": "live", "text": "Kodiak normal need water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/3/S01"}}}
+{"suite": "mecp", "source": "live", "text": "Kardiac urgent need food.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/1/S02"}}}
+{"suite": "chat", "source": "live", "text": "We need more water at the camp.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "Pass, pass, pass, home break.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "Bronto Bronto Brova from Cordo.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "Yeah.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is same message from Lecky, we are testing the chart.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is coming from Corbo over.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is coming from Blackie over.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is another message from Corvo, we are testing the chart.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is a ride your track, ride your track, ride your track.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is a regular chat message from Corvo. I repeat, regular chat message from Corvo.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is a radio check, radio check, mobile.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is Blakey coming back to the base.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "Just as a radio check, the water is clear.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "I think we need water. I think we need water.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "Fast, test, fast, song break.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "We're shooting the film. We're shooting the film.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is Corvo, I am inside this greenhouse and checking the solution.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is Corporal, the generator is now full. I repeat the electric generator is a long job.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "The blue bicycle is near the library.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "Energy level is 29.2% resting and state of charge is 98% reading 98% state of charge over.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "1-2-3, 1-2-3, 1-2-3", "expect": {"type": "chat"}}
+{"suite": "mecp", "source": "constructed", "text": "Codeac urgent need water", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/1/S01"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak urgent need wader", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/1/S01"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak, urgent, we are out of water", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/1/S01"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak urgent we have run out of food", "expect": {"type": "rejected", "reason": "invalid_parameter", "category": "mecp"}, "note": "paraphrase for laya (expected mecp.report/S02); the rules reject it, as deterministic/3 did"}
+{"suite": "mecp", "source": "constructed", "text": "Kodiac urgen need medicine", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/1/S03"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak mayday my friend is bleeding badly", "expect": {"type": "rejected", "reason": "ambiguous"}, "note": "paraphrase for laya (expected mecp.report/M06); the rules reject it, as deterministic/3 did"}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak urgent someone fell and broke a leg", "expect": {"type": "rejected", "reason": "missing_parameter", "category": "mecp"}, "note": "paraphrase for laya (expected mecp.report/M07); the rules reject it, as deterministic/3 did"}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak safety the road is blocked", "expect": {"type": "rejected", "reason": "missing_parameter", "category": "mecp"}, "note": "paraphrase for laya (expected mecp.report/T01); the rules reject it, as deterministic/3 did"}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak mayday there is a fire", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/T07"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak routine coffee is ready", "expect": {"type": "rejected", "reason": "invalid_parameter", "category": "mecp"}, "note": "paraphrase for laya (expected mecp.report/L02); the rules reject it, as deterministic/3 did"}
+{"suite": "rch", "source": "constructed", "text": "Kodiak who is online", "expect": {"type": "intent", "category": "rch", "intent": "mission.users"}}
+{"suite": "rch", "source": "constructed", "text": "Kodiak show me the list of users", "expect": {"type": "rejected", "reason": "no_intent"}, "note": "paraphrase for laya (expected mission.users); the rules reject it, as deterministic/3 did"}
+{"suite": "rch", "source": "constructed", "text": "Kodiak how much time is left", "expect": {"type": "intent", "category": "rch", "intent": "mission.time"}}
+{"suite": "rch", "source": "constructed", "text": "Kodiak is the name of the bear", "expect": {"type": "rejected", "reason": "missing_parameter", "category": "mecp"}, "note": "paraphrase for laya (expected no_intent); the rules reject it, as deterministic/3 did"}
+{"suite": "chat", "source": "constructed", "text": "The road is blocked near the bridge, over.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "constructed", "text": "Mayday was a great film", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "constructed", "text": "Urgent, bring coffee to the tent", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "constructed", "text": "Cardiac arrest is a medical term", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is message one from the edge of the hill.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "Radio test. The blue bicycle is near the library. Please confirm that you can hear me clearly.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "We have a ship in the field. I repeat, we have a ship in the field.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is a radio track, radio track.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is a radio check from Lakey, radio check from Lakey.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "Bronto, Bronto, Brova, Broncordo.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is test number one from the edge of the hill going toward the lake.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is message number 3 from the edge of the phone bridge.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is message number four, sound delay. Okay.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is Korvo, I am inside the garage. Of course.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "Testing voice recognition from Greenwood's over.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "This is Corvo testing voice recognition from the garage over.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "Thank you.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "One, two, three, four.", "expect": {"type": "chat"}}
+{"suite": "chat", "source": "live", "text": "To the south, over, I'm still inside Greenhouse, checking for the peeps. I release these insects.", "expect": {"type": "chat"}}
+{"suite": "mecp", "source": "live", "text": "Kodiak Mayday need water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S01"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiaks mayday meet water", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/S01"}}, "note": "REQ-07 P2: 'Kodiaks' and 'meet' are recorded mishearings, not yet heard together"}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak hostile 300 meters 6 o'clock", "expect": {"type": "intent", "category": "marker", "intent": "contact.report", "data": {"affiliation": "hostile", "direction_type": "relative_clock", "relative_bearing_deg": 180, "distance_m": 300}}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak friendly two persons 100 meters 12 o'clock", "expect": {"type": "intent", "category": "marker", "intent": "contact.report", "data": {"affiliation": "friendly", "classification": "person", "quantity": 2, "direction_type": "relative_clock", "relative_bearing_deg": 0, "distance_m": 100}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak urgent road blocked bridge out", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/1/T01 T02", "codes": ["T01", "T02"]}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak urgent need food", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/1/S02"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak safety road blocked", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/2/T01"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak routine at camp", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/3/L05"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak mayday severe bleeding", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/M06"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak mayday injured, broken leg, need water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/M01 M07 S01", "codes": ["M01", "M07", "S01"]}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak mayday trapped, four people, time 1430 hours.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/P01 4pax @1430"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak urgent stranded 45.5017, -73.5673", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/1/P01 45.5017,-73.5673"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak routine ETA twenty minutes", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/3/R03 20"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak routine have space for five people", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/3/H07 5pax"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak mayday injured, callsign Bravo Six, language French.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/0/M01 @fr ~BRAVO-6"}}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak safety road blocked, reference alpha one, details north gate.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"content": "MECP/2/T01 #ALPHA-1 north gate"}}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak hostile, 300 meters, 6 o'clock.", "expect": {"type": "intent", "category": "marker", "intent": "contact.report", "data": {"affiliation": "hostile", "direction_type": "relative_clock", "relative_bearing_deg": 180, "distance_m": 300}}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak hostile, two vehicles, 500 meters, 3 o'clock, moving north.", "expect": {"type": "intent", "category": "marker", "intent": "contact.report", "data": {"affiliation": "hostile", "classification": "vehicle", "quantity": 2, "activity": "moving north", "direction_type": "relative_clock", "relative_bearing_deg": 90, "distance_m": 500}}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak unknown, half a kilometer, 3:30.", "expect": {"type": "intent", "category": "marker", "intent": "contact.report", "data": {"affiliation": "unknown", "direction_type": "relative_clock", "relative_bearing_deg": 105, "distance_m": 500}}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak neutral, one kilometer, bearing 270.", "expect": {"type": "intent", "category": "marker", "intent": "contact.report", "data": {"affiliation": "neutral", "direction_type": "compass_bearing", "bearing_deg": 270, "distance_m": 1000}}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak suspect, three hundred meters, northwest.", "expect": {"type": "intent", "category": "marker", "intent": "contact.report", "data": {"affiliation": "suspect", "direction_type": "compass_bearing", "bearing_deg": 315, "distance_m": 300}}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak hostile 9 o'clock 200 meters", "expect": {"type": "intent", "category": "marker", "intent": "contact.report", "data": {"affiliation": "hostile", "direction_type": "relative_clock", "relative_bearing_deg": 270, "distance_m": 200}}}
+{"suite": "chat", "source": "constructed", "text": "The hostile group left the water point.", "expect": {"type": "chat"}, "note": "REQ-07 N1: command words without activation"}
+{"suite": "chat", "source": "constructed", "text": "Mayday was a great film.", "expect": {"type": "chat"}, "note": "REQ-07 N1: command words without activation"}
+{"suite": "chat", "source": "constructed", "text": "We need water, not a mayday, over.", "expect": {"type": "chat"}, "note": "REQ-07 N1: command words without activation"}
+{"suite": "chat", "source": "constructed", "text": "Hostile, 300 meters, 6 o'clock.", "expect": {"type": "chat"}, "note": "REQ-07 N1: command words without activation"}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak hostile 300 meters", "expect": {"type": "rejected", "reason": "missing_parameter", "category": "marker"}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak hostile 6 o'clock", "expect": {"type": "rejected", "reason": "missing_parameter", "category": "marker"}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak don't create a marker", "expect": {"type": "rejected", "reason": "cancelled"}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak hostile friendly 300 meters 6 o'clock", "expect": {"type": "rejected", "reason": "contradictory", "category": "marker"}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak hostile 300 meters 500 meters 6 o'clock", "expect": {"type": "rejected", "reason": "contradictory", "category": "marker"}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak hostile 300 meters 6 o'clock 9 o'clock", "expect": {"type": "rejected", "reason": "contradictory", "category": "marker"}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak hostile 300 meters 6 o'clock bearing 090", "expect": {"type": "rejected", "reason": "contradictory", "category": "marker"}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak hostile 0 meters 6 o'clock", "expect": {"type": "rejected", "reason": "invalid_parameter", "category": "marker"}}
+{"suite": "ddd", "source": "constructed", "text": "Kodiak hostile 300 meters 6 o'clock, no, cancel", "expect": {"type": "rejected", "reason": "cancelled", "category": "marker"}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak mayday banana split", "expect": {"type": "rejected", "reason": "missing_parameter", "category": "mecp"}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak urgent need water and some bananas", "expect": {"type": "rejected", "reason": "invalid_parameter", "category": "mecp"}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak mayday we don't need water anymore", "expect": {"type": "rejected", "reason": "cancelled", "category": "mecp"}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak urgent need water, we have water", "expect": {"type": "rejected", "reason": "contradictory", "category": "mecp"}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak urgent mayday bleeding", "expect": {"type": "rejected", "reason": "contradictory", "category": "mecp"}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak mayday need water rescue", "expect": {"type": "rejected", "reason": "ambiguous", "category": "mecp"}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak mayday deed water", "expect": {"type": "rejected", "reason": "ambiguous", "category": "mecp"}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak need water", "expect": {"type": "rejected", "reason": "missing_parameter", "category": "mecp"}}
+{"suite": "mecp", "source": "constructed", "text": "Kodiak urgent hostile 300 meters 6 o'clock", "expect": {"type": "rejected", "reason": "ambiguous"}}
+{"suite": "rch", "source": "constructed", "text": "Kodiak list users.", "expect": {"type": "intent", "category": "rch", "intent": "mission.users"}}
+{"suite": "rch", "source": "constructed", "text": "Kodiak help", "expect": {"type": "intent", "category": "rch", "intent": "help"}}
+{"suite": "rch", "source": "constructed", "text": "Kodiak time remaining", "expect": {"type": "intent", "category": "rch", "intent": "mission.time"}}
