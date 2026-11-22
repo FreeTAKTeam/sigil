@@ -241,7 +241,12 @@ impl IntentClassifier for DeterministicClassifier {
     }
 
     fn classify(&self, command: &str) -> Classification {
-        let tokens = self.mecp.join_severities(&tokenize(command));
+        // A repeated activation word ("Kodiak Kodiak routine …") is not
+        // part of the command.
+        let mut tokens = tokenize(command);
+        let repeats = tokens.iter().take_while(|t| t.word == WAKE).count();
+        tokens.drain(..repeats);
+        let tokens = self.mecp.join_severities(&tokens);
         let (tokens, mut corrections) = self.corrector.drop_false_starts(&tokens);
         let words: Vec<&str> = tokens.iter().map(|t| t.word.as_str()).collect();
         let verbatim = self.mecp.verbatim(&words);
@@ -560,7 +565,7 @@ mod tests {
     #[test]
     fn vocabulary_versions_are_recorded() {
         let versions = DeterministicClassifier::new().vocabularies();
-        assert_eq!(versions["mecp"], "1.6");
+        assert_eq!(versions["mecp"], "1.7");
         assert_eq!(versions["contact"], "1.3");
         assert_eq!(versions["rch"], "1.1");
     }
@@ -602,6 +607,9 @@ mod tests {
     /// Rules added after the 22 November 2026 voice samples.
     #[test]
     fn live_voice_sample_fixes() {
+        // A repeated activation word is dropped.
+        assert_eq!(mecp("kodiak routine heading home"), "MECP/3/L14");
+        assert_eq!(mecp("kodiak kodiak routine heading home"), "MECP/3/L14");
         // A plural unit after "one": a number word was most likely dropped.
         assert_eq!(
             reason("friendly one meters twelve o'clock"),
