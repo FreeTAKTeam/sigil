@@ -34,7 +34,7 @@ The API is synchronous. Recognition and classification are CPU-bound and Sigil r
 
 ## Result contract `kodiak.result.v2`
 
-Every result carries `"schema": "kodiak.result.v2"` and a `type`. Intents and rejections also record the classifier and the version of each vocabulary it used (`"vocabularies":{"contact":"1.2","mecp":"1.5","rch":"1.1"}`, omitted below).
+Every result carries `"schema": "kodiak.result.v2"` and a `type`. Intents and rejections also record the classifier and the version of each vocabulary it used (`"vocabularies":{"contact":"1.3","mecp":"1.6","rch":"1.1"}`, omitted below).
 
 ```json
 {"schema":"kodiak.result.v2","type":"chat","content":"We need more food at the camp."}
@@ -188,7 +188,9 @@ The 15 new distinct transcripts are also `live` cases; the two wrong distances a
 
 **Second read-through, Weather, Supplies, Position and Coordination rows** (Corvo): 21 of 27 correct, the others rejected or chat, no wrong code. Weather passed 6 of 6. Revision 5 adds "en route to" and the recorded "un route two" (P04), and the false-start rule fixes "stranded, st stuck" (P01). The remaining failures are recognizer errors that are not safe aliases ("Relatives" for "relay this message", "renderwood, art" for "rendezvous at") or transcripts without the activation word or the severity. Repeated "Fabric dispatched" lines for one message ID are retries: the publisher resends when no delivery proof arrives within 2 s.
 
-Regression results: MECP 127/127, DDD 38/38, chat 49/49, RCH 7/7.
+**Basic card, Italian speaker with a heavy accent** (16 phrases as phone voice notes, not on air, replayed through Parakeet; ETA read two ways): 12 of 17 clips were correct at first. MECP revision 6 adds "medei" and "may die" (mayday) and "con sign" (callsign); contact revision 3 adds "ostile" (the Italian word) and "style" for hostile, because "Kodiak hostile" was heard as "Kodiako style" and the misheard wake word still activates. With them, 16 of 17 give the intended result; "details north gate" is kept as heard ("Nord Gate"), since free text is never corrected. "ETA" said letter by letter was heard as "eighty-eight" and stays rejected: as an alias it would take a real number, so "eighty eight people" would no longer be a person count. The Italian "eta" passed. The clips are in `transcripts/kodiak-test/basic-it-accent`.
+
+Regression results: MECP 136/136, DDD 45/45, chat 49/49, RCH 7/7.
 
 ## Verification (22 November 2026): multi-event MECP and DDD markers
 

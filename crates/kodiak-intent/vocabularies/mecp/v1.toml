@@ -1,4 +1,4 @@
-# Kodiak MECP voice vocabulary, version 1, revision 5.
+# Kodiak MECP voice vocabulary, version 1, revision 6.
 #
 # Codes, labels and severities follow the canonical MECP tables:
 #   REM  apps/mobile/src/utils/mecp.ts               (commit 3e1e172)
@@ -20,7 +20,7 @@
 
 schema = "kodiak.vocabulary.mecp"
 version = 1
-revision = 5
+revision = 6
 
 # Words that may surround an MECP report without changing its meaning.
 fillers = ["we", "i", "a", "an", "the", "is", "are", "am", "please", "more", "some",
@@ -45,8 +45,9 @@ pax_units = ["people", "persons", "person", "pax"]
 # ETA or duration after R03, as units in minutes. A bare number is minutes.
 eta_units = { minute = 1, minutes = 1, min = 1, mins = 1, hour = 60, hours = 60, hr = 60, hrs = 60 }
 # "callsign bravo six" -> ~BRAVO-6. "cosign" and "cold sign" are how
-# Parakeet wrote "callsign" on live NFM audio (22 November 2026).
-callsign_words = ["callsign", "call sign", "cosign", "cold sign"]
+# Parakeet wrote "callsign" on live NFM audio (22 November 2026); "con sign"
+# from an Italian speaker the same day.
+callsign_words = ["callsign", "call sign", "cosign", "cold sign", "con sign"]
 # "reference alpha one" -> #ALPHA-1
 reference_words = ["reference", "ref", "incident number", "ticket"]
 # "time fourteen thirty", "time 1430 hours", "1430 zulu" -> @1430
@@ -102,8 +103,9 @@ level = 0
 label = "Mayday"
 # Parakeet transcribed a spoken "mayday" over live NFM as "May Day" and, from
 # the saved WAV of the same transmission, as "may they".
-# On 22 November 2026 Corvo's "mayday" was heard as "made a" twice.
-words = ["mayday", "may day", "may they", "made a"]
+# On 22 November 2026 Corvo's "mayday" was heard as "made a" twice, and an
+# Italian speaker's (voice notes) as "Medei" and "may die".
+words = ["mayday", "may day", "may they", "made a", "medei", "may die"]
 
 [[severities]]
 level = 1

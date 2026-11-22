@@ -1,4 +1,4 @@
-# Kodiak contact (marker) report vocabulary, version 1, revision 2.
+# Kodiak contact (marker) report vocabulary, version 1, revision 3.
 #
 # Spoken order is free; the standard form is Description, Distance, Direction:
 # "Kodiak hostile, two vehicles, 500 meters, 3 o'clock, moving north".
@@ -21,7 +21,8 @@ schema = "kodiak.vocabulary.contact"
 version = 1
 # Revision 2 (22 November 2026): negations, fractions ("half a kilometer"),
 # "a kilometer", and "<n> degrees" as a compass bearing.
-revision = 2
+# Revision 3 (22 November 2026): "ostile" and "style" for hostile.
+revision = 3
 
 fillers = ["contact", "contacts", "at", "my", "our", "the", "a", "an", "of", "is", "are",
   "about", "approximately", "approx", "roughly", "around", "range", "distance", "direction",
@@ -50,7 +51,9 @@ quarter = 0.25
 [affiliations]
 friendly = ["friendly", "friendlies", "friend", "friends", "blue"]
 # "hostel" is how both bundled recognizers transcribed a synthesized "hostile".
-hostile = ["hostile", "hostiles", "enemy", "enemies", "hostel", "hostels"]
+# An Italian speaker says "ostile" (the Italian word); Parakeet wrote
+# "Kodiak hostile" from that speaker as "Kodiako style".
+hostile = ["hostile", "hostiles", "enemy", "enemies", "hostel", "hostels", "ostile", "style"]
 neutral = ["neutral", "neutrals"]
 unknown = ["unknown", "unidentified"]
 suspect = ["suspect", "suspected", "suspicious"]

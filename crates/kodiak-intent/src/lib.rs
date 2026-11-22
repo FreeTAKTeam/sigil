@@ -560,8 +560,8 @@ mod tests {
     #[test]
     fn vocabulary_versions_are_recorded() {
         let versions = DeterministicClassifier::new().vocabularies();
-        assert_eq!(versions["mecp"], "1.5");
-        assert_eq!(versions["contact"], "1.2");
+        assert_eq!(versions["mecp"], "1.6");
+        assert_eq!(versions["contact"], "1.3");
         assert_eq!(versions["rch"], "1.1");
     }
 
