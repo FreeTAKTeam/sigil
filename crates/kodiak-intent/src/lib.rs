@@ -20,7 +20,7 @@
 //! severity is `missing_parameter`, and anything else is `no_intent`.
 //!
 //! When the engine finds no activation word, a first word that sounds like it
-//! ("Kardiac", "Podax", "Codeac") still activates, but only when the rest of
+//! ("Kardiac", "Cardiac", "Podax") still activates, but only when the rest of
 //! the transcript is a recognized command, so conversation stays chat
 //! ([`first_word_wake`]).
 
@@ -42,7 +42,7 @@ pub use text::tokenize;
 use vocabulary::VocabularyError;
 
 /// Identifier recorded in results produced by [`DeterministicClassifier`].
-pub const DETERMINISTIC_ID: &str = "deterministic/4";
+pub const DETERMINISTIC_ID: &str = "deterministic/5";
 
 /// Rule-based classifier over the embedded vocabularies.
 pub struct DeterministicClassifier {
@@ -160,31 +160,16 @@ impl DeterministicClassifier {
 /// The activation word a misheard first word is compared with.
 const WAKE: &str = "kodiak";
 
-/// Largest edit distance at which a first word still counts as the
-/// activation word. Words shorter than four letters never count.
-const WAKE_DISTANCE: usize = 3;
-
-/// Edit distance between two short words.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut previous = row[0];
-        row[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let current = row[j + 1];
-            row[j + 1] = (previous + usize::from(ca != *cb))
-                .min(row[j] + 1)
-                .min(current + 1);
-            previous = current;
-        }
-    }
-    row[b.len()]
-}
+/// Largest sound-aware distance, in half edits, at which a first word still
+/// counts as the activation word: three edits, where letters that sound
+/// alike over radio (c/k, a/o, …) cost half an edit. Words shorter than four
+/// letters never count.
+const WAKE_DISTANCE: u32 = 6;
 
 /// When the first word of `transcript` sounds like the activation word
-/// (edit distance at most 3 to "kodiak", four letters or more), returns that
-/// word as heard and the command after it.
+/// (at most three edits from "kodiak", counting sound-alike letters as half
+/// an edit, and four letters or more), returns that word as heard and the
+/// command after it. "Cardiac" qualifies: c/k and a/o sound alike.
 ///
 /// This only finds a candidate: callers must still require the command to be
 /// recognized before treating the transcript as addressed to Kodiak.
@@ -197,7 +182,7 @@ pub fn first_word_wake(transcript: &str) -> Option<(String, String)> {
         .unwrap_or(rest.len());
     let heard = &rest[..end];
     let bare = heard.to_lowercase();
-    (bare.chars().count() >= 4 && edit_distance(&bare, WAKE) <= WAKE_DISTANCE)
+    (bare.chars().count() >= 4 && fuzzy::distance(&bare, WAKE) <= WAKE_DISTANCE)
         .then(|| (heard.to_owned(), rest[end..].to_owned()))
 }
 
@@ -257,7 +242,9 @@ impl IntentClassifier for DeterministicClassifier {
 
     fn classify(&self, command: &str) -> Classification {
         let tokens = self.mecp.join_severities(&tokenize(command));
-        let (tokens, mut corrections) = self.corrector.correct(tokens);
+        let words: Vec<&str> = tokens.iter().map(|t| t.word.as_str()).collect();
+        let verbatim = self.mecp.verbatim(&words);
+        let (tokens, mut corrections) = self.corrector.correct(tokens, &verbatim);
         let result = self.classify_tokens(&tokens, &mut corrections);
         Classification {
             result,
@@ -571,7 +558,7 @@ mod tests {
     #[test]
     fn vocabulary_versions_are_recorded() {
         let versions = DeterministicClassifier::new().vocabularies();
-        assert_eq!(versions["mecp"], "1.2");
+        assert_eq!(versions["mecp"], "1.3");
         assert_eq!(versions["contact"], "1.2");
         assert_eq!(versions["rch"], "1.1");
     }
@@ -589,6 +576,11 @@ mod tests {
         assert_eq!(addressed.command, " urgent need food.");
         let addressed = rules.addressed("Podax, mayday, meet water.").unwrap();
         assert_eq!(addressed.heard.as_deref(), Some("Podax"));
+        // Heard on air on 22 November 2026; c/k and a/o sound alike.
+        let addressed = rules
+            .addressed("Cardiac, May Day Severe Bleeding.")
+            .unwrap();
+        assert_eq!(addressed.heard.as_deref(), Some("Cardiac"));
         let addressed = rules.addressed("Kodiaks mayday meet water").unwrap();
         assert_eq!(addressed.heard.as_deref(), Some("Kodiaks"));
         // "Kodiaks" before an incomplete command stays chat.
@@ -602,6 +594,74 @@ mod tests {
             "God yeah. May they need water.",
         ] {
             assert_eq!(rules.addressed(chat), None, "{chat}");
+        }
+    }
+
+    /// Rules added after the 22 November 2026 voice samples.
+    #[test]
+    fn live_voice_sample_fixes() {
+        // A plural unit after "one": a number word was most likely dropped.
+        assert_eq!(
+            reason("friendly one meters twelve o'clock"),
+            RejectReason::Ambiguous
+        );
+        assert_eq!(
+            reason("hostile three o'clock one kilometres"),
+            RejectReason::Ambiguous
+        );
+        assert!(classify("hostile one kilometer three o'clock").is_ok());
+        assert!(classify("hostile 1 meter three o'clock").is_ok());
+        // Bearings as hundreds and a two-digit number.
+        for (text, expected) in [
+            ("neutral one kilometre bearing two seventy", 270),
+            ("neutral 500 meters bearings one twenty five", 125),
+            ("neutral 500 meters three fifteen degrees", 315),
+            ("neutral 500 meters bearing two seven zero", 270),
+        ] {
+            match classify(text) {
+                Ok(Intent::ContactReport(ContactReport {
+                    direction: Direction::CompassBearing { bearing_deg },
+                    ..
+                })) => assert_eq!(bearing_deg, expected, "{text}"),
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+        assert_eq!(
+            reason("neutral 500 meters bearing four seventy"),
+            RejectReason::InvalidParameter
+        );
+        // Recorded spellings of words and keywords.
+        assert_eq!(
+            mecp("mayday injure broken leg need water"),
+            "MECP/0/M01 M07 S01"
+        );
+        assert_eq!(mecp("urgent roadblocked bridge out"), "MECP/1/T01 T02");
+        assert_eq!(
+            mecp("mayday injure cosign bravo sixth language french"),
+            "MECP/0/M01 @fr ~BRAVO-6"
+        );
+        assert_eq!(
+            mecp("mayday injured cold sign bravo twelve"),
+            "MECP/0/M01 ~BRAVO-12"
+        );
+        // A word outside the phonetic alphabet is never sent in a callsign.
+        assert_eq!(
+            reason("mayday injured cold sign revo six"),
+            RejectReason::InvalidParameter
+        );
+        assert_eq!(
+            reason("safety road blocked reference offer one"),
+            RejectReason::InvalidParameter
+        );
+        // Free text and identifiers keep their spelling: no corrections.
+        let rules = DeterministicClassifier::new();
+        let result = rules.classify("safety road blocked reference alpha one details north gate");
+        assert!(result.corrections.is_empty(), "{:?}", result.corrections);
+        match result.result {
+            Ok(Intent::MecpReport(MecpReport { content, .. })) => {
+                assert_eq!(content, "MECP/2/T01 #ALPHA-1 north gate");
+            }
+            other => panic!("{other:?}"),
         }
     }
 }

@@ -70,7 +70,7 @@ fn substitution(a: char, b: char) -> u32 {
 }
 
 /// Weighted Levenshtein distance in half units.
-fn distance(heard: &str, word: &str) -> u32 {
+pub fn distance(heard: &str, word: &str) -> u32 {
     let heard: Vec<char> = heard.chars().collect();
     let word: Vec<char> = word.chars().collect();
     let mut previous: Vec<u32> = (0..=word.len())
@@ -168,11 +168,17 @@ impl Corrector {
     }
 
     /// Replaces unknown words with their unambiguous vocabulary match.
-    pub fn correct(&self, tokens: Vec<Token>) -> (Vec<Token>, Vec<Correction>) {
+    /// Tokens marked in `verbatim` (free text, callsign and reference
+    /// values) keep their transcribed spelling.
+    pub fn correct(&self, tokens: Vec<Token>, verbatim: &[bool]) -> (Vec<Token>, Vec<Correction>) {
         let mut corrections = Vec::new();
         let tokens = tokens
             .into_iter()
-            .map(|mut token| {
+            .enumerate()
+            .map(|(index, mut token)| {
+                if verbatim.get(index).copied().unwrap_or(false) {
+                    return token;
+                }
                 if let Some(word) = self.closest(&token.word) {
                     corrections.push(Correction {
                         heard: token.word.clone(),
@@ -204,7 +210,7 @@ mod tests {
     }
 
     fn read(text: &str) -> (Vec<String>, Vec<Correction>) {
-        let (tokens, corrections) = corrector().correct(tokenize(text));
+        let (tokens, corrections) = corrector().correct(tokenize(text), &[]);
         (tokens.into_iter().map(|t| t.word).collect(), corrections)
     }
 

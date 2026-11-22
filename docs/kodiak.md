@@ -34,30 +34,30 @@ The API is synchronous. Recognition and classification are CPU-bound and Sigil r
 
 ## Result contract `kodiak.result.v2`
 
-Every result carries `"schema": "kodiak.result.v2"` and a `type`. Intents and rejections also record the classifier and the version of each vocabulary it used (`"vocabularies":{"contact":"1.2","mecp":"1.2","rch":"1.1"}`, omitted below).
+Every result carries `"schema": "kodiak.result.v2"` and a `type`. Intents and rejections also record the classifier and the version of each vocabulary it used (`"vocabularies":{"contact":"1.2","mecp":"1.3","rch":"1.1"}`, omitted below).
 
 ```json
 {"schema":"kodiak.result.v2","type":"chat","content":"We need more food at the camp."}
 
 {"schema":"kodiak.result.v2","type":"intent","category":"mecp","intent":"mecp.report",
  "data":{"severity":1,"code":"S02","codes":["S02"],"content":"MECP/1/S02"},
- "transcript":"Kodiak. Urgent. Need Food.","classifier":"deterministic/4"}
+ "transcript":"Kodiak. Urgent. Need Food.","classifier":"deterministic/5"}
 
 {"schema":"kodiak.result.v2","type":"intent","category":"mecp","intent":"mecp.report",
  "data":{"severity":0,"code":"P01","codes":["P01","M01"],"content":"MECP/0/P01 M01 4pax @1430",
          "parameters":{"pax":4,"timestamp":"1430"}},
- "transcript":"Kodiak mayday trapped, injured, four people, time 1430 hours.","classifier":"deterministic/4"}
+ "transcript":"Kodiak mayday trapped, injured, four people, time 1430 hours.","classifier":"deterministic/5"}
 
 {"schema":"kodiak.result.v2","type":"intent","category":"marker","intent":"contact.report",
  "data":{"affiliation":"hostile","direction_type":"relative_clock","relative_bearing_deg":180,"distance_m":300},
- "transcript":"Kodiak hostile, 300 meters, 6 o'clock.","classifier":"deterministic/4"}
+ "transcript":"Kodiak hostile, 300 meters, 6 o'clock.","classifier":"deterministic/5"}
 
 {"schema":"kodiak.result.v2","type":"intent","category":"rch","intent":"mission.users","data":{},
- "transcript":"Kodiak list users.","classifier":"deterministic/4"}
+ "transcript":"Kodiak list users.","classifier":"deterministic/5"}
 
 {"schema":"kodiak.result.v2","type":"rejected","category":"marker","reason":"cancelled",
  "detail":"the contact report is negated or cancelled by \"no\"",
- "transcript":"Kodiak hostile 300 meters 6 o'clock, no, cancel","classifier":"deterministic/4"}
+ "transcript":"Kodiak hostile 300 meters 6 o'clock, no, cancel","classifier":"deterministic/5"}
 ```
 
 - **Changes from `kodiak.result.v1`:** additions only. MECP `data` gains `codes` (every event, in spoken order; `code` stays the first one) and `parameters`; rejections gain the reasons `contradictory` and `cancelled`; results gain `vocabularies`. Version 1 documents still decode (a v1 report becomes `codes: [code]`); results are always written as version 2.
@@ -67,14 +67,14 @@ Every result carries `"schema": "kodiak.result.v2"` and a `type`. Intents and re
 - **Optional contact fields:** `classification`, `quantity` and `activity`.
 - **Corrections:** an intent or rejection lists every transcribed word that was read as a different vocabulary word, for example `"corrections":[{"heard":"meet","read_as":"need"}]`. The field is omitted when every word matched exactly.
 - **Confidence:** only a classifier that produces a calibrated probability reports `confidence` (for example `laya/2`). `deterministic/3` never does, and Kodiak never invents one.
-- **Misheard activation word:** a classifier may judge that a transcript without the activation word still addresses Kodiak (`IntentClassifier::addressed`). The removed word is then listed first in `corrections`, read as `kodiak`. `deterministic/3` accepts a first word within edit distance 3 of "kodiak" (4 letters or more, such as "Kardiac", "Podax" or "Codeac"), but only when the rest of the transcript is a recognized command; otherwise the transcript stays chat.
+- **Misheard activation word:** a classifier may judge that a transcript without the activation word still addresses Kodiak (`IntentClassifier::addressed`). The removed word is then listed first in `corrections`, read as `kodiak`. `deterministic/5` accepts a first word of 4 letters or more within three edits of "kodiak", where letters that sound alike over radio (c/k, a/o, …) count as half an edit, such as "Kardiac", "Cardiac", "Podax" or "Codeac", but only when the rest of the transcript is a recognized command; otherwise the transcript stays chat.
 - **Strict decoding:** an unknown schema version, or an intent whose category doesn't match, fails to decode.
 
 ## Vocabularies (schema version 1)
 
 The vocabulary files are in `crates/kodiak-intent/vocabularies/`, embedded at compile time and validated when loaded. Each file has a schema `version` and a content `revision`; results record them as `version.revision`. Loading fails on an unknown field, a phrase claimed by two codes, an alias repeated in one list, a word with two roles (for example a filler that is also a negation), a parameter keyword or language name that is also an event phrase, a conflict naming an unknown code, or an alias that is not lower case.
 
-- **MECP (`mecp/v1.toml`, revision 2).**
+- **MECP (`mecp/v1.toml`, revision 3).**
   - Contains the 4 severities and all 108 event codes shared by REM (`apps/mobile/src/utils/mecp.ts`) and RCH (`crates/r3akt-profile-rch/src/lib.rs`).
   - Kodiak adds only spoken phrases; it doesn't redefine any code.
   - A report needs exactly one severity word (mayday, urgent, safety, routine) and one or more events. Spoken variants heard on the radio are also accepted: "may day" and "may they" for mayday, "normal" for routine.
@@ -85,12 +85,13 @@ The vocabulary files are in `crates/kodiak-intent/vocabularies/`, embedded at co
     - ETA with R03: "eta twenty minutes", "eta one hour" → `20`, `60`;
     - keyword values: "callsign bravo six" → `~BRAVO-6`, "reference alpha one" → `#ALPHA-1`, "time fourteen thirty" or "1430 zulu" → `@1430`, "language french" → `@fr`, "details north gate" → free text to the end of the transmission.
   - A keyword value stops at a filler, a negation, another keyword or an event phrase, and has at most three words. A message over 200 bytes is rejected.
+  - **Callsigns and references** may contain only numbers and phonetic-alphabet words (`identifier_words`). Any other word rejects the report, so "callsign Revo Six" (a misheard "Bravo Six") is never sent as `~REVO-6`. An ordinal is read as its number ("Bravo Sixth" → `BRAVO-6`). "cosign" and "cold sign" are accepted as the callsign keyword, as Parakeet wrote it on air.
   - **Negations:** a negation that is not part of an event phrase cancels the report ("mayday don't need water"). "not breathing", "no water" and "cancel beacon" are events.
   - B04 is left out because it exists in REM only; RCH reports it as unknown.
 - **Contact (`contact/v1.toml`, revision 2).** The standard form is Description, Distance, Direction ("hostile, 300 meters, 6 o'clock"), but the parts may come in any order.
   - **Affiliation:** friendly, hostile, neutral, unknown or suspect, kept separate from the classification.
-  - **Direction:** a clock position relative to the operator's heading (whole and half hours, spoken or written as `3:30` or `330`), or an absolute bearing: `bearing two seven zero`, `270 degrees`, or an 8-point compass direction. Absolute bearings are never turned into clock positions or the other way round.
-  - **Distance:** in metres or kilometres, including "half a kilometer", "a kilometer" and "quarter of a klick", up to `max_distance_m` (100 km). Zero, negative or two different distances are rejected.
+  - **Direction:** a clock position relative to the operator's heading (whole and half hours, spoken or written as `3:30` or `330`), or an absolute bearing: `bearing two seven zero`, `bearing two seventy`, `270 degrees`, or an 8-point compass direction. Absolute bearings are never turned into clock positions or the other way round.
+  - **Distance:** in metres or kilometres, including "half a kilometer", "a kilometer" and "quarter of a klick", up to `max_distance_m` (100 km). Zero, negative or two different distances are rejected. "One" with a plural unit ("one meters") is rejected as `ambiguous`: on air it was "one hundred meters" with "hundred" dropped.
   - **Optional details:** classification, quantity and activity (`moving north`).
   - Two different affiliations, distances or directions are `contradictory`; any negation word cancels the report.
 - **RCH (`rch/v1.toml`).**
@@ -111,7 +112,8 @@ Live NFM tests showed that the recognizer spells the same spoken command differe
 4. **Second chance for leftover MECP words.** A known word that no MECP phrase used may be read as an MECP filler word if it clearly sounds like one. "meet" (from the phrase "meet at") becomes "need". Fillers carry no meaning, so this can only drop a misheard word; it can never add an action.
 5. **Protected words.** Negations and cancellations (`not`, `no`, `never`, `don`, `cannot`, `cancel`, `stop`, `ignore` and others) are never corrected and never used as targets. "Kodiak mayday we don't need water anymore" is rejected as `cancelled`. Parameter keywords, units and language names are never targets either, so a misheard word cannot start a free-text value.
 6. **No events from corrections.** A corrected word may support a report with one event, but a report with several events is rejected as `ambiguous` if any of them rests on a corrected word. "mayday deed water" would otherwise read "deed" as "dead" and add M10.
-7. **Audit trail.** Every replacement is listed in the result's `corrections`, saved in the transcript and gateway events, and logged by Sigil as `Kodiak read "meet" as "need"`.
+7. **Verbatim values.** Free text (everything after "details") and callsign and reference values are never corrected. "north gate" stays "north gate", and "Bravo Sixth" is not turned into "Bravo sixty".
+8. **Audit trail.** Every replacement is listed in the result's `corrections`, saved in the transcript and gateway events, and logged by Sigil as `Kodiak read "meet" as "need"`.
 
 Multi-word and plural severity spellings ("may day", "may they", "maydays") are also accepted. Free-text arguments such as a nickname or a library search keep the words as transcribed.
 
@@ -152,6 +154,34 @@ Kodiak is ready for a model without depending on one:
 - **Spoken values versus metadata:** Kodiak's result holds only what the operator said. The radio identity (from the correlated BSS ID), position and heading come from Sigil. On the MECP wire both kinds of coordinates are the same token, so the Kodiak result in the transcript and event files is the record of which was spoken.
 - **Contact position:** computed with the great-circle destination formula on a spherical Earth.
 - **Intent switch:** `[rch].send_intents` turns intent publishing on or off. The gateway stays receive-only and sends no acknowledgement or voice feedback to the radio.
+
+## Verification (22 November 2026): live voice samples
+
+Two speakers read the same 16 phrases (9 MECP, 7 DDD) over NFM on 435.9950 MHz: a female speaker on BLACKY, then a male speaker on Corvo. Sigil attributed every transmission to the right radio. Parakeet v2 INT8 transcripts were classified by `deterministic/4`:
+
+| Speaker | Correct | Rejected | Wrong result |
+|---|---|---|---|
+| BLACKY, female | 11 | 5 | 0 |
+| Corvo, male | 9 | 6 | 1 ("one meters" → 1 m contact) |
+
+The wrong result was not sent as a marker only because clock directions are refused while `bss_heading_is_compass = false`. `deterministic/5` (MECP vocabulary 1.3) adds:
+
+- "one" with a plural unit is `ambiguous`;
+- bearings spoken as hundreds and a two-digit number ("two seventy");
+- "injure" (M01), "roadblocked" (T01), and "cosign" and "cold sign" as callsign keywords;
+- phonetic-alphabet-only callsigns and references, with ordinals read as numbers;
+- no fuzzy correction in free text, callsigns or references.
+
+With these rules, 26 of the 32 transcripts give the intended command and the other 6 are rejected without sending anything. Five of those 6 are recognizer errors ("forty to thirty hours", "Revo Six", "one meters", "Cordia Safty Row Block", "Alpha Kilometre Tree Dirty"); the sixth is "breach out" for "bridge out", which needs another recording before it becomes an alias. The 31 distinct transcripts are in `regression.v2.jsonl` as `live` cases, noted with the speaker.
+
+**Corvo retest with `deterministic/5`** (same male speaker and phrases): 10 of 16 correct, 4 rejected and 2 wrong results.
+
+- The fixed cases passed: "call sign Bravo Six", "road, blocked, bridge out", "time fourteen thirty hours", and "details North Gate" kept as spoken.
+- "Cardiac" was not accepted as the activation word (four plain edits from "kodiak"), so two complete commands stayed chat. The wake-word match is now sound-aware and accepts it.
+- **Two distances were wrong:** "two hundred meters" was heard as "twenty meters", and "three hundred metres" as "twenty metres". Both are well-formed numbers, so no parser rule can detect them. The second, a compass-bearing contact, was published to the hub as a 20 m suspect marker. This is a limit of speech recognition and needs an operational answer (confirmation, a minimum distance, or digit-by-digit distances), not a vocabulary change.
+- "Tm" for "three hundred meters" and "Anno Alpha Kilometer" for "unknown, half a kilometer" are recognizer failures and were rejected. This speaker's "half a" was heard as "Alpha" in both Corvo sessions.
+
+The 15 new distinct transcripts are also `live` cases; the two wrong distances are recorded with what the parser returns and a note on what was said. Regression results: MECP 70/70, DDD 38/38, chat 46/46, RCH 7/7.
 
 ## Verification (22 November 2026): multi-event MECP and DDD markers
 

@@ -1,4 +1,4 @@
-# Kodiak MECP voice vocabulary, version 1, revision 2.
+# Kodiak MECP voice vocabulary, version 1, revision 3.
 #
 # Codes, labels and severities follow the canonical MECP tables:
 #   REM  apps/mobile/src/utils/mecp.ts               (commit 3e1e172)
@@ -20,7 +20,7 @@
 
 schema = "kodiak.vocabulary.mecp"
 version = 1
-revision = 2
+revision = 3
 
 # Words that may surround an MECP report without changing its meaning.
 fillers = ["we", "i", "a", "an", "the", "is", "are", "am", "please", "more", "some",
@@ -44,8 +44,9 @@ negations = ["not", "no", "never", "don", "dont", "doesn", "didn", "isn", "aren"
 pax_units = ["people", "persons", "person", "pax"]
 # ETA or duration after R03, as units in minutes. A bare number is minutes.
 eta_units = { minute = 1, minutes = 1, min = 1, mins = 1, hour = 60, hours = 60, hr = 60, hrs = 60 }
-# "callsign bravo six" -> ~BRAVO-6
-callsign_words = ["callsign", "call sign"]
+# "callsign bravo six" -> ~BRAVO-6. "cosign" and "cold sign" are how
+# Parakeet wrote "callsign" on live NFM audio (22 November 2026).
+callsign_words = ["callsign", "call sign", "cosign", "cold sign"]
 # "reference alpha one" -> #ALPHA-1
 reference_words = ["reference", "ref", "incident number", "ticket"]
 # "time fourteen thirty", "time 1430 hours", "1430 zulu" -> @1430
@@ -63,6 +64,13 @@ text_words = ["details", "note", "notes", "remarks", "description"]
 minus_words = ["minus"]
 coordinate_separators = ["comma", "by"]
 max_value_words = 3
+# Words a callsign or reference may contain besides numbers: the phonetic
+# alphabet. Any other word rejects the report, so a misheard letter ("Revo"
+# for "Bravo") is never sent as part of a callsign. Empty allows any word.
+identifier_words = ["alpha", "alfa", "bravo", "charlie", "delta", "echo", "foxtrot",
+  "golf", "hotel", "india", "juliet", "juliett", "kilo", "lima", "mike", "november",
+  "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform", "victor",
+  "whiskey", "whisky", "xray", "yankee", "zulu"]
 
 # Spoken language name -> ISO 639-1 code.
 [languages]
@@ -116,7 +124,7 @@ words = ["routine", "normal"]
 [[codes]]
 code = "M01"
 label = "Injury"
-phrases = ["injury", "injured", "someone injured", "person injured", "hurt", "someone hurt"]
+phrases = ["injury", "injured", "injure", "someone injured", "person injured", "hurt", "someone hurt"]
 
 [[codes]]
 code = "M02"
@@ -192,7 +200,7 @@ phrases = ["area searched", "no victims", "no victims found", "area searched no 
 [[codes]]
 code = "T01"
 label = "Road blocked"
-phrases = ["road blocked", "road block", "roadblock", "blocked road"]
+phrases = ["road blocked", "road block", "roadblock", "roadblocked", "blocked road"]
 
 [[codes]]
 code = "T02"

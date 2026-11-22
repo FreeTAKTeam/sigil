@@ -152,7 +152,8 @@ impl Parser {
             .map(|bearing| (*bearing, 1))
     }
 
-    /// A bearing spoken digit by digit ("two seven zero") or as a number.
+    /// A bearing spoken digit by digit ("two seven zero"), as hundreds and
+    /// a two-digit number ("two seventy", "one twenty five") or as a number.
     fn bearing(words: &[&str]) -> Option<(f64, usize)> {
         let digits: Vec<u32> = words
             .iter()
@@ -163,7 +164,33 @@ impl Parser {
             let value = digits.iter().fold(0, |total, digit| total * 10 + digit);
             return Some((f64::from(value), digits.len()));
         }
+        if let [hundreds, ..] = words
+            && !hundreds.starts_with(|c: char| c.is_ascii_digit())
+            && let Some(hundreds @ 1..=3) = single_digit(hundreds)
+            && let Some((rest, used)) = number(&words[1..])
+            && rest.fract() == 0.0
+            && (10.0..100.0).contains(&rest)
+        {
+            return Some((f64::from(hundreds) * 100.0 + rest, used + 1));
+        }
         number(words)
+    }
+
+    /// A distance from a number and its unit word. "One meters" is refused
+    /// as ambiguous: a plural unit after one means the recognizer most
+    /// likely dropped a word ("one hundred meters" heard as "one meters").
+    fn spoken_distance(&self, value: f64, unit_word: &str) -> Result<u32, Rejection> {
+        let unit = self.unit(Some(&unit_word)).unwrap_or(1.0);
+        let plural = unit_word
+            .strip_suffix('s')
+            .is_some_and(|singular| self.vocabulary.units.contains_key(singular));
+        if (value - 1.0).abs() < f64::EPSILON && plural {
+            return Err(reject(
+                RejectReason::Ambiguous,
+                format!("\"one {unit_word}\": a number word may be missing"),
+            ));
+        }
+        self.distance(value, unit)
     }
 
     fn distance(&self, value: f64, unit: f64) -> Result<u32, Rejection> {
@@ -298,18 +325,29 @@ impl Parser {
                 if clock_position.is_none()
                     && let Some((hour, minutes, used)) = clock(rest)
                     && let Some((value, length)) = number(&rest[used..])
-                    && let Some(unit) = self.unit(rest.get(used + length))
+                    && let Some(unit_word) = rest
+                        .get(used + length)
+                        .filter(|w| self.unit(Some(w)).is_some())
                 {
                     set(&mut clock_position, (hour, minutes), "clock position")?;
-                    set(&mut distance, self.distance(value, unit)?, "distance")?;
+                    set(
+                        &mut distance,
+                        self.spoken_distance(value, unit_word)?,
+                        "distance",
+                    )?;
                     index += used + length + 1;
                     continue;
                 }
                 // Distance: a number followed by a unit.
                 if let Some((value, length)) = number(rest)
-                    && let Some(unit) = self.unit(rest.get(length))
+                    && let Some(unit_word) =
+                        rest.get(length).filter(|w| self.unit(Some(w)).is_some())
                 {
-                    set(&mut distance, self.distance(value, unit)?, "distance")?;
+                    set(
+                        &mut distance,
+                        self.spoken_distance(value, unit_word)?,
+                        "distance",
+                    )?;
                     index += length + 1;
                     continue;
                 }

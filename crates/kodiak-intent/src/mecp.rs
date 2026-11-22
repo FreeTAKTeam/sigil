@@ -65,6 +65,24 @@ fn whole(value: f64, low: f64, high: f64) -> Option<u16> {
     (value.fract() == 0.0 && (low..=high).contains(&value)).then_some(value as u16)
 }
 
+/// An ordinal word read as its number in a callsign ("bravo sixth" is how
+/// "bravo six" was transcribed on live audio).
+fn ordinal(word: &str) -> Option<u16> {
+    let value = match word {
+        "first" => 1,
+        "second" => 2,
+        "third" => 3,
+        "fourth" => 4,
+        "fifth" => 5,
+        "sixth" => 6,
+        "seventh" => 7,
+        "eighth" => 8,
+        "ninth" => 9,
+        _ => return None,
+    };
+    Some(value)
+}
+
 /// A span of matched words: start, end and code index.
 type Span = (usize, usize, usize);
 
@@ -254,29 +272,91 @@ impl Parser {
             || phrase_starts.contains(&at)
     }
 
-    /// A callsign or reference: up to `max_value_words` words, digits
-    /// written as digits, words joined with `-` ("bravo six" → `BRAVO-6`).
-    fn identifier(&self, words: &[&str], phrase_starts: &[usize], from: usize) -> (String, usize) {
-        let mut value = String::new();
+    /// The words of a callsign or reference value, with its length.
+    fn value_span(&self, words: &[&str], phrase_starts: &[usize], from: usize) -> usize {
         let mut used = 0;
-        let mut last_digit = false;
         while from + used < words.len()
             && used < self.vocabulary.parameters.max_value_words
             && !self.ends_value(words, from + used, phrase_starts)
         {
-            let word = words[from + used];
-            let digit = single_digit(word).filter(|_| word != "o");
-            if !(value.is_empty() || last_digit && digit.is_some()) {
-                value.push('-');
-            }
-            match digit {
-                Some(digit) => value.push(char::from_digit(digit, 10).unwrap_or('0')),
-                None => value.push_str(&word.to_uppercase()),
-            }
-            last_digit = digit.is_some();
             used += 1;
         }
-        (value, used)
+        used
+    }
+
+    /// A callsign or reference: up to `max_value_words` words, numbers
+    /// written as digits, words joined with `-` ("bravo six" → `BRAVO-6`).
+    /// Words must be numbers or listed `identifier_words`; an ordinal
+    /// ("bravo sixth") is read as its number.
+    fn identifier(
+        &self,
+        words: &[&str],
+        phrase_starts: &[usize],
+        from: usize,
+    ) -> Result<(String, usize), Rejection> {
+        let used = self.value_span(words, phrase_starts, from);
+        let allowed = &self.vocabulary.parameters.identifier_words;
+        let mut value = String::new();
+        let mut last_digit = false;
+        for &word in &words[from..from + used] {
+            let digits = if matches!(word, "o" | "oh") {
+                None
+            } else {
+                ordinal(word)
+                    .or_else(|| number(&[word]).and_then(|(v, _)| whole(v, 0.0, 9999.0)))
+                    .map(|v| v.to_string())
+            };
+            if digits.is_none() && !allowed.is_empty() && !allowed.contains(word) {
+                return Err(reject(
+                    RejectReason::InvalidParameter,
+                    format!(
+                        "{word:?} in a callsign or reference is neither a phonetic-alphabet word nor a number"
+                    ),
+                ));
+            }
+            if !(value.is_empty() || last_digit && digits.is_some()) {
+                value.push('-');
+            }
+            match &digits {
+                Some(digits) => value.push_str(digits),
+                None => value.push_str(&word.to_uppercase()),
+            }
+            last_digit = digits.is_some();
+        }
+        Ok((value, used))
+    }
+
+    /// Which words keep their transcribed spelling: everything after a text
+    /// keyword, and callsign and reference values. The fuzzy corrector must
+    /// not change them ("north gate" is not "north late", "sixth" is not
+    /// "sixty").
+    pub fn verbatim(&self, words: &[&str]) -> Vec<bool> {
+        let spans = self.candidates(words);
+        let starts: Vec<usize> = spans.iter().map(|s| s.0).collect();
+        let mut keep = vec![false; words.len()];
+        let mut index = 0;
+        while index < words.len() {
+            let inside = spans.iter().any(|s| s.0 <= index && index < s.1);
+            match self.keyword(&words[index..]).filter(|_| !inside) {
+                Some((length, Keyword::Text)) => {
+                    for flag in &mut keep[index + length..] {
+                        *flag = true;
+                    }
+                    break;
+                }
+                Some((length, Keyword::Callsign | Keyword::Reference)) => {
+                    let from = index + length;
+                    let used = self.value_span(words, &starts, from);
+                    for flag in &mut keep[from..from + used] {
+                        *flag = true;
+                    }
+                    index = from + used;
+                }
+                Some((length, _)) => index += length,
+                None => index += 1,
+            }
+        }
+        keep
     }
 
     /// A time of day after a time keyword: `1430`, `14:30`, "fourteen
@@ -443,7 +523,7 @@ impl Parser {
                     taken
                 }
                 Keyword::Callsign | Keyword::Reference => {
-                    let (value, taken) = self.identifier(words, &starts, from);
+                    let (value, taken) = self.identifier(words, &starts, from)?;
                     if taken == 0 {
                         return Err(missing());
                     }
