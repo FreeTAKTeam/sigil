@@ -12,18 +12,43 @@ Copy `gateway.example.toml` to `gateway.toml`. Set `[identity].allowlist` to the
 
 ```powershell
 $env:R3AKT_IDENTITY_PASSPHRASE = Read-Host 'Identity registry passphrase' -MaskInput
-.\target\release\r3akt-sigil.exe listen --config .\gateway.toml --backend parakeet --gain-db 0 --save-wav
+.\target\release\r3akt-sigil.exe listen --config .\gateway.toml --gain-db 0 --save-wav
 ```
 
-The passphrase must contain at least 16 bytes. Use a strong unique passphrase and retain it separately from backups. On Linux, provide the same environment variable and use the `whisper` backend in the default build. Identity and Fabric paths are relative to the TOML file. A gateway configured without RCH still writes correlated events locally. `--bss-only` listens for IDs and locations without loading an ASR model.
+The passphrase must contain at least 16 bytes. Use a strong unique passphrase and retain it separately from backups. On Linux, provide the same environment variable. Identity and Fabric paths are relative to the TOML file. A gateway configured without RCH still writes correlated events locally. `--bss-only` listens for IDs and locations without loading an ASR model.
 
 Configure the radio to send BSS ID or location on PTT release. Wait for `Listening on 435.9950 MHz` before transmitting. `gateway_*.json` files identify correlated or unresolved voice and independently decoded positions. The managed LXMF source appears in the Fabric journal under `data/fabric/<rch-delivery-hash>`. A transport proof confirms native Reticulum delivery. Verify application ingestion in RCH chat and on the telemetry map.
+
+### Radios and their identities
+
+Sigil signs each radio's messages with that radio's own Reticulum identity, kept in the encrypted database `radios.sqlite3` under `[identity].registry_path`. Allowlisted radios get a generated identity on first sight. To have RCH show a radio's messages from the operator's own address, import the operator's Reticulum identity file (for example from Sideband or REM):
+
+```powershell
+.\target\release\r3akt-sigil.exe radios --config .\gateway.toml list
+.\target\release\r3akt-sigil.exe radios --config .\gateway.toml import Corvo --identity-file .\corvo.identity --replace
+```
+
+`list` shows each BSS ID with its LXMF address, identity source, last seen time and last position. Run these commands while the gateway is stopped, with `R3AKT_IDENTITY_PASSPHRASE` set. Replacing an identity changes the radio's LXMF address on RCH. An imported identity used at the same time by the operator's own app announces the same address from two places. A registry kept as separate files by earlier versions is converted automatically on first use; the old files are moved to `legacy-files`.
+
+### Voice commands with Kodiak
+
+Start a transmission with "Kodiak" to send a command instead of chat. For example:
+
+- "Kodiak, urgent, need food" files `MECP/1/S02` with the radio's position.
+- "Kodiak, hostile, bearing two seven zero, 800 meters" places a contact marker.
+- "Kodiak, list users" sends RCH's `mission.users` command from the radio's identity.
+
+A command that Kodiak cannot parse completely is ignored, never guessed. MECP and contact reports need a GPS fix from the radio's BSS packets. Set `[rch].send_intents = false` to publish chat only. Read [docs/kodiak.md](docs/kodiak.md) before enabling commands on a live hub, especially its limitations section. An experimental laya model classifier exists behind `--features laya`; it did not beat the rules in testing ([benchmark](docs/kodiak-laya-benchmark.md)), so the rules stay the default. To try the command language without a radio:
+
+```powershell
+cargo run -p kodiak-intent --example kodiak_text -- "Kodiak hostile three thirty two hundred meters"
+```
 
 The [gateway architecture](docs/architecture.md) covers event correlation, recovery, telemetry compatibility, and identity backups. The [developer guide](docs/developer-guide.md) describes the modules, signal chain, threading model, file schemas and tests.
 
 ## Run on Windows
 
-Run these commands from the project directory. Save the Whisper base.en model as `models/ggml-base.en.bin` or use `--model` to select another local whisper.cpp model. [Download base.en](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin)
+Run these commands from the project directory. Speech is recognized offline with NVIDIA Parakeet TDT v2 (English, 0.6B parameters, INT8) through Sherpa-ONNX. Extract the model to `models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8`, which contains `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt`, or pass its directory with `--model`. [Sherpa-ONNX model download](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2) · [NVIDIA Parakeet TDT v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2)
 
 The release executable uses the x64 Visual C++ v14 runtime. [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/)
 
@@ -33,7 +58,7 @@ The release executable uses the x64 Visual C++ v14 runtime. [Microsoft Visual C+
 
 Leave the channel idle until the console prints `Listening on 435.9950 MHz`. Each completed transmission goes to a separate inference worker so the receiver can keep capturing. Ctrl+C closes the receiver and drains queued clips. A continuous open carrier is split into clips up to 30 seconds.
 
-JSON files in `transcripts` contain the source, frequency in Hz, UTC timestamps, audio duration and transcript text. An empty text field indicates Whisper returned no text. `--save-wav` adds a 16 kHz mono PCM file alongside each JSON. Live start and end timestamps track the received carrier. For WAV imports they record the import time.
+JSON files in `transcripts` contain the source, frequency in Hz, UTC timestamps, audio duration and transcript text. An empty text field indicates the recognizer returned no text. `--save-wav` adds a 16 kHz mono PCM file alongside each JSON. Live start and end timestamps track the received carrier. For WAV imports they record the import time.
 
 ### Tune and set gain or squelch
 
@@ -51,21 +76,19 @@ Gain is rounded to the nearest step the tuner supports. By default the listener 
 
 WAV mode accepts PCM or float input between 8 and 192 kHz, up to five minutes. It downmixes and resamples the file for transcription. The frequency is a label in WAV mode.
 
-### Use Parakeet TDT v2 for English
+### Use Whisper instead
 
-Build with the `parakeet` feature and extract the Sherpa-ONNX INT8 English model to `models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8`. It contains `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx`, and `tokens.txt`. Use `--model` with a directory path to place it elsewhere. [Sherpa-ONNX model download](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2) · [NVIDIA Parakeet TDT v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2)
+Whisper (whisper.cpp) remains available. Save a model such as base.en as `models/ggml-base.en.bin`, or pass another with `--model`, and select it with `--backend whisper`. On this project's test CPU Whisper base took about 4 s per clip against about 0.5–0.9 s for Parakeet. [Download base.en](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin)
 
 ```powershell
-cargo build --release --locked --features parakeet
-.\target\release\r3akt-sigil.exe listen --backend parakeet --gain-db 16.6 --save-wav
-.\target\release\r3akt-sigil.exe wav .\voice.wav --backend parakeet --output-dir .\wav-check
+.\target\release\r3akt-sigil.exe listen --backend whisper --save-wav
 ```
 
-Keep the Sherpa-ONNX and ONNX Runtime DLLs next to the Parakeet-enabled Windows executable. The build places them in the release directory. Whisper remains the default backend for existing commands.
+Keep the Sherpa-ONNX and ONNX Runtime DLLs next to the Windows executable; the build places them in the release directory. A Whisper-only build without ONNX Runtime uses `cargo build --release --locked --no-default-features`.
 
 ## Build and test
 
-Use the pinned Rust MSVC toolchain, Visual Studio C++ Build Tools with a Windows SDK, CMake on PATH, and an x64 LLVM installation. Point `LIBCLANG_PATH` to the directory containing `libclang.dll` if Cargo cannot discover it. The headless build fetches the pinned SDR-RS DSP dependencies and compiles bundled libusb and whisper.cpp.
+Use the pinned Rust MSVC toolchain, Visual Studio C++ Build Tools with a Windows SDK, CMake on PATH, and an x64 LLVM installation. Point `LIBCLANG_PATH` to the directory containing `libclang.dll` if Cargo cannot discover it. The headless build fetches the pinned SDR-RS DSP dependencies, compiles bundled libusb and whisper.cpp, and downloads the Sherpa-ONNX shared libraries for Parakeet.
 
 ```powershell
 cargo build --release --locked
@@ -79,11 +102,11 @@ The radio path uses the CPU-only [SDR-RS DSP crates](https://github.com/jasonher
 ### Package for Windows and Linux
 
 ```powershell
-.\scripts\package-windows.ps1
+.\scripts\package-windows.ps1 -ModelPath .\models\sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8
 .\scripts\package-windows.ps1 -WhisperOnly -ModelPath .\models\ggml-base.en.bin
 ```
 
-The Windows package includes the native executable, runtime DLLs for its selected backend, configuration example, and instructions. From the extracted bundle, run `.\r3akt-sigil.exe` in place of `.\target\release\r3akt-sigil.exe`. Use `-ModelPath` to include a local compatible model. On Linux x64 or ARM64, install a C/C++ toolchain, CMake, Clang and libclang, then run `sh scripts/package-linux.sh`. You can pass a local Whisper model to include it. Linux requires USB access for the account running the gateway. The embedded mode runs within the executable.
+The Windows package includes the native executable, runtime DLLs for its selected backend, configuration example, and instructions. From the extracted bundle, run `.\r3akt-sigil.exe` in place of `.\target\release\r3akt-sigil.exe`. Use `-ModelPath` to include a local Parakeet model directory or Whisper model. On Linux x64 or ARM64, install a C/C++ toolchain, CMake, Clang and libclang, then run `sh scripts/package-linux.sh`, optionally with a Parakeet model directory or Whisper model file. The Linux bundle carries the Sherpa-ONNX and ONNX Runtime shared libraries; run it with `LD_LIBRARY_PATH` set to the bundle directory if they are not found. `WHISPER_ONLY=1` builds a Whisper-only bundle. The Linux Parakeet bundle has not been tested on Linux yet. Linux requires USB access for the account running the gateway. The embedded mode runs within the executable.
 
 ## Live acceptance
 
@@ -146,7 +169,7 @@ Set the radio's Digital Channel to the intended frequency and select the BSS for
 .\target\release\r3akt-sigil.exe bss-wav .\vr-n76-discriminator.wav --frequency-hz 435995000 --output-dir .\bss-replay --bss-diagnostics
 
 # Receive voice and BSS on the same channel with a Parakeet-enabled build.
-.\target\release\r3akt-sigil.exe listen --bss --backend parakeet --frequency-hz 435995000 --gain-db 16.6
+.\target\release\r3akt-sigil.exe listen --bss --frequency-hz 435995000 --gain-db 16.6
 ```
 
 `--bss-capture` writes continuous unfiltered mono discriminator audio at 32 kHz. Use a new filename and stop after a short capture for WAV replay. The decoder taps that same audio before speech filtering, de-emphasis and squelch. Combined mode masks recognized BSS intervals before sending the remaining speech to the recognizer. BSS-only mode runs without a speech model.
@@ -160,7 +183,7 @@ A CRC-verified VR-N76 location packet included `0x8B` followed by four bytes bef
 Replay the same discriminator audio through both workers with `gateway-wav`. Supply each squelch-open interval in milliseconds relative to the start of the recording, because the WAV contains FM discriminator samples without its RF power measurement. Leave at least the correlation timeout in the recording after the last speech interval.
 
 ```powershell
-.\target\release\r3akt-sigil.exe gateway-wav .\vr-n76-discriminator.wav --rf-open 1000:5000 --rf-open 7000:11500 --backend parakeet --output-dir .\gateway-replay
+.\target\release\r3akt-sigil.exe gateway-wav .\vr-n76-discriminator.wav --rf-open 1000:5000 --rf-open 7000:11500 --output-dir .\gateway-replay
 ```
 
 Set `forward_bss = true` under `[lxmf]` to forward live BSS messages through the existing watcher. Forwarded chat includes sender and any BSS text. Coordinates and raw location bytes stay in the local event. Start the watcher before receiving the packets you want to forward.

@@ -29,9 +29,10 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::config::Config;
-use crate::correlation::{GatewayEvent, Kind};
-use crate::identity::{PASSPHRASE_ENV, Registered, Registry, write_atomic};
-use crate::output::{Source, frequency_label, log};
+use crate::correlation::{GatewayEvent, Kind, Unresolved};
+use crate::identity::{PASSPHRASE_ENV, Registered, Registry, UNIDENTIFIED, write_atomic};
+use crate::intents::{self, Plan};
+use crate::output::{Source, log};
 use crate::telemetry;
 
 const DELIVERY_TTL: i64 = 7 * 24 * 60 * 60;
@@ -95,6 +96,9 @@ struct Delivery {
     message_id: Option<String>,
     receipt_hash: Option<String>,
     last_error: Option<String>,
+    /// Why an event was ignored locally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default, Eq, PartialEq)]
@@ -106,6 +110,8 @@ enum Status {
     TransportConfirmed,
     PolicyRejected,
     NoMessage,
+    /// Kodiak rejected the command, or a required position or heading was missing.
+    Ignored,
     Expired,
 }
 
@@ -197,6 +203,14 @@ impl<'a> Publisher<'a> {
                 publisher.insert_sender(&id, display_name, registered)?;
             }
         }
+        if let Some(name) = config.identity.unidentified() {
+            let registered = publisher.registry.unidentified_identity()?;
+            log(format_args!(
+                "Unidentified speech publishes as {name:?} ({})",
+                registered.destination.to_hex_string()
+            ));
+            publisher.insert_sender(UNIDENTIFIED, name.to_owned(), registered)?;
+        }
         Ok(publisher)
     }
 
@@ -241,7 +255,7 @@ impl<'a> Publisher<'a> {
                 || !matches!(event.source, Source::Live)
                 || event.timestamp < self.active_after
                 || !valid_event_id(&event.id)
-                || radio_for(&event.kind).is_none()
+                || sender_for(&event.kind, self.config.identity.unidentified()).is_none()
             {
                 continue;
             }
@@ -250,7 +264,10 @@ impl<'a> Publisher<'a> {
                 Ok(json) => match serde_json::from_slice::<Delivery>(&json) {
                     Ok(delivery) => delivery,
                     Err(error) => {
-                        log(format_args!("Preserving invalid Fabric delivery record {}: {error}", record.display()));
+                        log(format_args!(
+                            "Preserving invalid Fabric delivery record {}: {error}",
+                            record.display()
+                        ));
                         continue;
                     }
                 },
@@ -287,39 +304,38 @@ impl<'a> Publisher<'a> {
     }
 
     fn send(&mut self, event: &GatewayEvent, delivery: &mut Delivery, now: i64) -> Result<()> {
-        let (id, name, position) = radio_for(&event.kind).context("event has no radio")?;
-        let Some(registered) = self.registry.observe(id, name, event.timestamp, position)? else {
-            delivery.status = Status::PolicyRejected;
-            log(format_args!(
-                "BSS radio {id:?} was rejected by the identity policy"
-            ));
-            return Ok(());
-        };
-        if let Some(sender) = self.senders.get_mut(id) {
-            ensure!(
-                sender.hash == registered.destination.to_hex_string(),
-                "stored radio sender identity changed"
-            );
-            if sender.name != name {
-                name.clone_into(&mut sender.name);
-                sender.last_announce = None;
+        let config = self.config;
+        let (id, name, position) = sender_for(&event.kind, config.identity.unidentified())
+            .context("event has no radio")?;
+        if id != UNIDENTIFIED {
+            self.register_radio(id, name, event.timestamp, position, delivery)?;
+            if delivery.status == Status::PolicyRejected {
+                return Ok(());
             }
-        } else {
-            self.insert_sender(id, name.into(), registered)?;
         }
         self.announce_due();
         let sender = &self.senders[id];
         delivery.source_destination = Some(sender.hash.clone());
         let (content, fields, kind) = match &event.kind {
-            Kind::Transcript { text, .. } if self.config.rch.send_chat => (
-                format!(
-                    "Radio: {name}\nFrequency: {}\nTime: {}\n\n{text}",
-                    frequency_label(event.frequency_hz),
-                    event.timestamp.to_rfc3339()
-                ),
-                None,
-                MessageKind::Chat,
-            ),
+            Kind::Transcript {
+                text,
+                kodiak,
+                position,
+                ..
+            } => match self.plan_transcript(event, id, name, text, kodiak.as_deref(), *position)? {
+                Plan::Chat(body) => (body, None, MessageKind::Chat),
+                Plan::Command { body, fields } => (body, Some(fields), MessageKind::Application),
+                Plan::Ignore(reason) => {
+                    log(format_args!("Ignored {} from {id}: {reason}", event.id));
+                    delivery.status = Status::Ignored;
+                    delivery.detail = Some(reason);
+                    return Ok(());
+                }
+                Plan::Nothing => {
+                    delivery.status = Status::NoMessage;
+                    return Ok(());
+                }
+            },
             Kind::Position { position, .. } if self.config.rch.send_telemetry => (
                 String::new(),
                 Some(telemetry::fields(name, *position, event.timestamp)?),
@@ -364,6 +380,60 @@ impl<'a> Publisher<'a> {
             )?
         };
         self.dispatch_verified(sender, &entry, delivery, now, id)
+    }
+
+    /// Resolves a BSS radio's identity and keeps its sender current.
+    fn register_radio(
+        &mut self,
+        id: &str,
+        name: &str,
+        seen: DateTime<Utc>,
+        position: Option<crate::bss::Position>,
+        delivery: &mut Delivery,
+    ) -> Result<()> {
+        let Some(registered) = self.registry.observe(id, name, seen, position)? else {
+            delivery.status = Status::PolicyRejected;
+            log(format_args!(
+                "BSS radio {id:?} was rejected by the identity policy"
+            ));
+            return Ok(());
+        };
+        if let Some(sender) = self.senders.get_mut(id) {
+            ensure!(
+                sender.hash == registered.destination.to_hex_string(),
+                "stored radio sender identity changed"
+            );
+            if sender.name != name {
+                name.clone_into(&mut sender.name);
+                sender.last_announce = None;
+            }
+        } else {
+            self.insert_sender(id, name.into(), registered)?;
+        }
+        Ok(())
+    }
+
+    fn plan_transcript(
+        &self,
+        event: &GatewayEvent,
+        id: &str,
+        name: &str,
+        text: &str,
+        kodiak: Option<&kodiak_core::KodiakResult>,
+        current: Option<crate::bss::Position>,
+    ) -> Result<Plan> {
+        let facts = intents::Context {
+            radio_name: name,
+            event_id: &event.id,
+            frequency_hz: event.frequency_hz,
+            timestamp: event.timestamp,
+            current,
+            last_known: self.registry.last_position(id)?,
+            heading_is_compass: self.config.kodiak.bss_heading_is_compass,
+            send_chat: self.config.rch.send_chat,
+            send_intents: self.config.rch.send_intents,
+        };
+        intents::plan(text, kodiak, &facts)
     }
 
     fn dispatch_verified(
@@ -518,18 +588,36 @@ fn valid_event_id(id: &str) -> bool {
         && !matches!(id, "." | ".." | "enabled")
 }
 
+/// The sender for an event: its BSS radio, or the unidentified-speech identity
+/// for a transcript that carried no BSS ID when that identity is enabled.
+/// Ambiguous or incomplete attributions are never published.
+fn sender_for<'e>(
+    kind: &'e Kind,
+    unidentified: Option<&'e str>,
+) -> Option<(&'e str, &'e str, Option<crate::bss::Position>)> {
+    radio_for(kind).or_else(|| match kind {
+        Kind::Transcript {
+            radio_id: None,
+            unresolved_reason: Some(Unresolved::MissingIdentifier),
+            ..
+        } => unidentified.map(|name| (UNIDENTIFIED, name, None)),
+        _ => None,
+    })
+}
+
 fn radio_for(kind: &Kind) -> Option<(&str, &str, Option<crate::bss::Position>)> {
     match kind {
         Kind::RadioSeen {
             radio_id,
             display_name,
-        }
-        | Kind::Transcript {
+        } => Some((radio_id, display_name, None)),
+        Kind::Transcript {
             radio_id: Some(radio_id),
             display_name: Some(display_name),
             unresolved_reason: None,
+            position,
             ..
-        } => Some((radio_id, display_name, None)),
+        } => Some((radio_id, display_name, *position)),
         Kind::Position {
             radio_id,
             display_name,
@@ -585,6 +673,7 @@ mod tests {
         config.identity.auto_register = true;
         config.identity.registry_path = dir.path().join("identity");
         config.identity.allowlist = ["R4".into(), "R5".into()].into();
+        config.identity.unidentified_sender = true;
         config.fabric.local_storage_path = dir.path().join("fabric");
         config.fabric.tcp_clients = vec![address];
         config.rch.enabled = true;
@@ -619,6 +708,8 @@ mod tests {
                     unresolved_reason: None,
                     started_at: Utc::now(),
                     text: format!("Test from {name}"),
+                    position: None,
+                    kodiak: None,
                 },
             };
             output.save_event(event.timestamp, "gateway", &event)?;
@@ -636,10 +727,56 @@ mod tests {
             };
             output.save_event(event.timestamp, "gateway", &event)?;
         }
+        // A Kodiak RCH command from R4 is forwarded as a field command; a
+        // rejected Kodiak command from R5 is never sent.
+        let engine = kodiak_core::Engine::new(kodiak_intent::DeterministicClassifier::new());
+        for (name, spoken) in [
+            ("R4", "Kodiak list users"),
+            ("R5", "Kodiak launch the missiles"),
+        ] {
+            let result = engine.process_text(&kodiak_core::TextInput::new(spoken));
+            let event = GatewayEvent {
+                schema: "sdr.gateway.v1".into(),
+                id: format!("local-{name}-kodiak"),
+                timestamp: Utc::now(),
+                frequency_hz: output.frequency_hz(),
+                source: Source::Live,
+                kind: Kind::Transcript {
+                    radio_id: Some(name.into()),
+                    display_name: Some(name.into()),
+                    bss_event_id: Some(format!("local-{name}-packet")),
+                    unresolved_reason: None,
+                    started_at: Utc::now(),
+                    text: spoken.into(),
+                    position: None,
+                    kodiak: Some(Box::new(result)),
+                },
+            };
+            output.save_event(event.timestamp, "gateway", &event)?;
+        }
+        // Speech without any BSS ID goes out from the unidentified identity.
+        let event = GatewayEvent {
+            schema: "sdr.gateway.v1".into(),
+            id: "local-unidentified-chat".into(),
+            timestamp: Utc::now(),
+            frequency_hz: output.frequency_hz(),
+            source: Source::Live,
+            kind: Kind::Transcript {
+                radio_id: None,
+                display_name: None,
+                bss_event_id: None,
+                unresolved_reason: Some(Unresolved::MissingIdentifier),
+                started_at: Utc::now(),
+                text: "Unidentified speaker".into(),
+                position: None,
+                kodiak: None,
+            },
+        };
+        output.save_event(event.timestamp, "gateway", &event)?;
         publisher.scan(output.directory(), &AtomicBool::new(false))?;
         let mut inbox = inbox;
         let mut received = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..6 {
             let data = peer_runtime.block_on(async {
                 tokio::time::timeout(Duration::from_secs(3), inbox.recv()).await
             })??;
@@ -663,7 +800,31 @@ mod tests {
                 .iter()
                 .filter(|message| message.source.as_slice() == registered.destination.as_slice())
                 .collect();
-            assert_eq!(messages.len(), 2);
+            assert_eq!(messages.len(), if name == "R4" { 3 } else { 2 });
+            if name == "R4" {
+                let command = messages
+                    .iter()
+                    .find_map(|message| {
+                        message
+                            .payload
+                            .fields
+                            .as_ref()?
+                            .as_map()?
+                            .iter()
+                            .find(|(key, _)| key.as_u64() == Some(9))
+                            .map(|(_, value)| value.clone())
+                    })
+                    .context("Kodiak command must be LXMF field 0x09")?;
+                let command = &command.as_array().context("field 9 is an array")?[0];
+                let lookup = |key: &str| {
+                    command
+                        .as_map()
+                        .and_then(|map| map.iter().find(|(k, _)| k.as_str() == Some(key)))
+                        .and_then(|(_, value)| value.as_str().map(str::to_owned))
+                };
+                assert_eq!(lookup("command_type").as_deref(), Some("mission.users"));
+                assert_eq!(lookup("command_id").as_deref(), Some("local-R4-kodiak"));
+            }
             assert!(
                 messages
                     .iter()
@@ -696,6 +857,20 @@ mod tests {
             known.push((name, registered.destination));
         }
         assert_ne!(known[0].1, known[1].1);
+        let unidentified = publisher.registry.unidentified_identity()?;
+        assert!(
+            known
+                .iter()
+                .all(|(_, radio)| *radio != unidentified.destination)
+        );
+        assert!(received.iter().any(|message| {
+            message.source.as_slice() == unidentified.destination.as_slice()
+                && message
+                    .payload
+                    .content
+                    .as_ref()
+                    .is_some_and(|content| content.ends_with(b"Unidentified speaker"))
+        }));
         drop(publisher);
         let restarted = Publisher::open_with_passphrase(&config, secret)?;
         for (id, destination) in known {

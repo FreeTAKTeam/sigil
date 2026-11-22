@@ -4,13 +4,14 @@ mod capture;
 mod config;
 mod correlation;
 mod identity;
+mod intents;
 mod output;
 mod processing;
 mod publisher;
 mod radio;
+mod radios;
 mod replay;
 mod telemetry;
-mod transcription;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,13 +20,86 @@ use std::thread;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use kodiak_core::{Engine, WakeWord};
+use kodiak_intent::DeterministicClassifier;
 
 use capture::Clip;
 use output::{Output, Source, frequency_label, log};
-use transcription::{Backend, Recognizer};
 
 const DEFAULT_FREQUENCY_HZ: u32 = 435_995_000;
+
+/// Offline speech recognition backends provided by `kodiak-asr`.
+/// NVIDIA Parakeet TDT v2 (English, 0.6B, INT8) is the default when built in.
+#[derive(Clone, Copy, ValueEnum)]
+enum Backend {
+    Whisper,
+    #[cfg(feature = "parakeet")]
+    Parakeet,
+}
+
+impl Backend {
+    #[cfg(feature = "parakeet")]
+    const DEFAULT: Self = Self::Parakeet;
+    #[cfg(not(feature = "parakeet"))]
+    const DEFAULT: Self = Self::Whisper;
+
+    fn default_model(self) -> &'static Path {
+        match self {
+            Self::Whisper => Path::new("models/ggml-base.en.bin"),
+            #[cfg(feature = "parakeet")]
+            Self::Parakeet => Path::new("models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"),
+        }
+    }
+
+    fn asr(self) -> kodiak_asr::Backend {
+        match self {
+            Self::Whisper => kodiak_asr::Backend::Whisper,
+            #[cfg(feature = "parakeet")]
+            Self::Parakeet => kodiak_asr::Backend::Parakeet,
+        }
+    }
+}
+
+/// One Kodiak engine per process. Its speech model loads on the first clip and
+/// is shared by every radio the gateway hears.
+fn kodiak(
+    backend: Backend,
+    model: &Path,
+    wake: WakeWord,
+    settings: &config::Kodiak,
+) -> Result<Engine> {
+    let model = model.to_owned();
+    let engine = match settings.classifier {
+        config::Classifier::Deterministic => Engine::new(DeterministicClassifier::new()),
+        #[cfg(feature = "laya")]
+        config::Classifier::Laya => {
+            let started = std::time::Instant::now();
+            let classifier = kodiak_laya::LayaClassifier::from_dir(
+                &settings.laya_checkpoint,
+                kodiak_laya::Policy {
+                    threshold: settings.laya_threshold,
+                    mode: kodiak_laya::Mode::Hybrid,
+                },
+            )
+            .map_err(anyhow::Error::msg)
+            .context("load the laya checkpoint")?;
+            log(format_args!(
+                "Kodiak classifier {} loaded in {:.1} s",
+                kodiak_core::IntentClassifier::id(&classifier),
+                started.elapsed().as_secs_f32()
+            ));
+            Engine::new(classifier)
+        }
+        #[cfg(not(feature = "laya"))]
+        config::Classifier::Laya => {
+            anyhow::bail!("classifier = \"laya\" needs a build with `--features laya`")
+        }
+    };
+    Ok(engine
+        .with_wake_word(wake)
+        .with_transcriber_loader(move || kodiak_asr::load(backend.asr(), &model)))
+}
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -39,7 +113,7 @@ struct Cli {
 #[derive(Args)]
 struct CommonArgs {
     /// Offline speech recognition backend.
-    #[arg(long, global = true, value_enum, default_value_t = Backend::Whisper)]
+    #[arg(long, global = true, value_enum, default_value_t = Backend::DEFAULT)]
     backend: Backend,
     /// Local model file or Parakeet model directory.
     #[arg(long, global = true)]
@@ -79,6 +153,10 @@ enum Command {
         /// Maximum trailing-ID correlation window in milliseconds.
         #[arg(long, value_parser = clap::value_parser!(u64).range(200..=30_000))]
         correlation_timeout_ms: Option<u64>,
+        /// Longest gap in milliseconds between the end of speech and a BSS
+        /// packet that still identifies the speaker.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(0..=10_000))]
+        trailing_id_gap_ms: Option<u64>,
     },
     /// Transcribe a local WAV file.
     Wav {
@@ -92,6 +170,14 @@ enum Command {
         #[arg(long)]
         bss_diagnostics: bool,
     },
+    /// View and manage the radio identity database.
+    Radios {
+        /// Gateway settings that locate the identity registry.
+        #[arg(long)]
+        config: PathBuf,
+        #[command(subcommand)]
+        action: radios::Action,
+    },
     /// Replay one 32 kHz discriminator WAV through the voice and BSS workers.
     GatewayWav {
         input: PathBuf,
@@ -100,11 +186,18 @@ enum Command {
         rf_open: Vec<replay::CarrierInterval>,
         #[arg(long, default_value_t = 5_000, value_parser = clap::value_parser!(u64).range(200..=30_000))]
         correlation_timeout_ms: u64,
+        #[arg(long, default_value_t = correlation::Timing::DEFAULT_TRAILING_GAP_MS, value_parser = clap::value_parser!(u64).range(0..=10_000))]
+        trailing_id_gap_ms: u64,
     },
 }
 
+#[expect(clippy::too_many_lines, reason = "one match over every subcommand")]
 fn main() -> Result<()> {
     let Cli { common, command } = Cli::parse();
+    let command = match command {
+        Command::Radios { config, action } => return radios::run(&config, action),
+        other => other,
+    };
     let model = common
         .model
         .as_deref()
@@ -119,6 +212,7 @@ fn main() -> Result<()> {
             bss_diagnostics,
             bss_capture,
             correlation_timeout_ms,
+            trailing_id_gap_ms,
         } => {
             settings.validate()?;
             let configured = config.is_some();
@@ -127,7 +221,10 @@ fn main() -> Result<()> {
                 .map(config::Config::load)
                 .transpose()?
                 .unwrap_or_default();
-            let recognizer = (!bss_only).then_some((common.backend, model));
+            let wake = WakeWord::with_forms(&config.kodiak.wake_words);
+            let engine = (!bss_only)
+                .then(|| kodiak(common.backend, model, wake, &config.kodiak))
+                .transpose()?;
             let data = (bss
                 || bss_only
                 || config.rch.enabled
@@ -150,20 +247,30 @@ fn main() -> Result<()> {
                 &output,
                 common.frequency_hz,
                 &settings,
-                recognizer,
+                engine.as_ref(),
                 data,
-                correlation_timeout_ms.unwrap_or(config.processing.correlation_timeout_ms),
+                correlation::Timing {
+                    window_ms: correlation_timeout_ms
+                        .unwrap_or(config.processing.correlation_timeout_ms),
+                    trailing_gap_ms: trailing_id_gap_ms
+                        .unwrap_or(config.processing.trailing_id_gap_ms),
+                },
                 publication,
             )
         }
         Command::Wav { input } => {
             let audio = audio::read_wav(&input)?;
-            let mut recognizer = Recognizer::load(common.backend, model)?;
+            let engine = kodiak(
+                common.backend,
+                model,
+                WakeWord::default(),
+                &config::Kodiak::default(),
+            )?;
             log(format_args!("Transcribing WAV {}", input.display()));
             let now = Utc::now();
             output
                 .transcribe(
-                    &mut recognizer,
+                    &engine,
                     &Clip {
                         started_at: now,
                         ended_at: now,
@@ -184,13 +291,23 @@ fn main() -> Result<()> {
             input,
             rf_open,
             correlation_timeout_ms,
+            trailing_id_gap_ms,
         } => replay::run(
             &input,
             &rf_open,
-            correlation_timeout_ms,
+            correlation::Timing {
+                window_ms: correlation_timeout_ms,
+                trailing_gap_ms: trailing_id_gap_ms,
+            },
             &output,
-            Recognizer::load(common.backend, model)?,
+            &kodiak(
+                common.backend,
+                model,
+                WakeWord::default(),
+                &config::Kodiak::default(),
+            )?,
         ),
+        Command::Radios { .. } => unreachable!("handled before the output directory is created"),
     }
 }
 
@@ -213,9 +330,9 @@ fn listen(
     output: &Output,
     frequency_hz: u32,
     settings: &radio::Settings,
-    recognition: Option<(Backend, &Path)>,
+    engine: Option<&Engine>,
     data: Option<bss::Decoder>,
-    timeout_ms: u64,
+    timing: correlation::Timing,
     publication: Option<publisher::Publisher<'_>>,
 ) -> Result<()> {
     let stopped = Arc::new(AtomicBool::new(false));
@@ -237,52 +354,37 @@ fn listen(
         log(format_args!("BSS decoder enabled on {frequency}"));
     }
 
-    let transcribe = recognition.map(|(backend, model)| {
-        let mut recognizer = None;
-        move |clip: &Clip| {
-            let recognizer = match &mut recognizer {
-                Some(loaded) => loaded,
-                empty => empty.insert(Recognizer::load(backend, model)?),
-            };
-            output.transcribe(recognizer, clip, Source::Live)
-        }
-    });
+    let transcribe =
+        engine.map(|engine| move |clip: &Clip| output.transcribe(engine, clip, Source::Live));
     let publisher_stopped = AtomicBool::new(false);
     thread::scope(|scope| {
         let stopped_publishing = &publisher_stopped;
         let worker = publication.map(|mut publisher| {
             scope.spawn(move || publisher.run(output.directory(), stopped_publishing))
         });
-        let result = processing::run(
-            output,
-            Source::Live,
-            timeout_ms,
-            transcribe,
-            data,
-            |ingress| {
-                radio::receive(
-                    &receiver,
-                    demodulator,
-                    settings.squelch_dbfs.is_none(),
-                    settings.monitor_power,
-                    &stopped,
-                    |event| {
-                        match event {
-                            radio::Event::Ready => log(format_args!("Listening on {frequency}")),
-                            radio::Event::Frame {
-                                open,
-                                audio,
-                                discriminator_audio,
-                                at,
-                            } => {
-                                ingress.push(open, audio, discriminator_audio, at);
-                            }
+        let result = processing::run(output, Source::Live, timing, transcribe, data, |ingress| {
+            radio::receive(
+                &receiver,
+                demodulator,
+                settings.squelch_dbfs.is_none(),
+                settings.monitor_power,
+                &stopped,
+                |event| {
+                    match event {
+                        radio::Event::Ready => log(format_args!("Listening on {frequency}")),
+                        radio::Event::Frame {
+                            open,
+                            audio,
+                            discriminator_audio,
+                            at,
+                        } => {
+                            ingress.push(open, audio, discriminator_audio, at);
                         }
-                        Ok(())
-                    },
-                )
-            },
-        );
+                    }
+                    Ok(())
+                },
+            )
+        });
         publisher_stopped.store(true, Ordering::Relaxed);
         if let Some(worker) = worker {
             worker.thread().unpark();

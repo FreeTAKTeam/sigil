@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
-    $features = if ($WhisperOnly) { @() } else { @('--features', 'parakeet') }
+    $features = if ($WhisperOnly) { @('--no-default-features') } else { @() }
     cargo build --release --locked @features
     if ($LASTEXITCODE) { throw 'Cargo build failed.' }
     $backend = if ($WhisperOnly) { 'whisper' } else { 'parakeet' }
@@ -15,7 +15,7 @@ try {
     New-Item -ItemType Directory -Path $bundle -Force | Out-Null
     Copy-Item -LiteralPath @('target/release/r3akt-sigil.exe', 'gateway.example.toml', 'README.md', 'LICENSE') -Destination $bundle -Force
     $documentation = New-Item -ItemType Directory -Path (Join-Path $bundle 'docs') -Force
-    Copy-Item -LiteralPath @('docs/architecture.md', 'docs/developer-guide.md') -Destination $documentation.FullName -Force
+    Copy-Item -LiteralPath @('docs/architecture.md', 'docs/developer-guide.md', 'docs/kodiak.md') -Destination $documentation.FullName -Force
     $images = New-Item -ItemType Directory -Path (Join-Path $documentation.FullName 'images') -Force
     Copy-Item -LiteralPath 'docs/images/sigil-logo.webp' -Destination $images.FullName -Force
     if (-not $WhisperOnly) {

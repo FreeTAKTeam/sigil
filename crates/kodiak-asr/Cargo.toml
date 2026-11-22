@@ -1,0 +1,34 @@
+[package]
+name = "kodiak-asr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+license = "GPL-2.0-or-later"
+description = "R3AKT Kodiak: offline speech recognizers (whisper.cpp, Parakeet TDT via Sherpa-ONNX)"
+repository = "https://github.com/FreeTAKTeam/R3AKT-Kodiak"
+
+[features]
+default = ["whisper"]
+# whisper.cpp through whisper-rs. Builds whisper.cpp from source (CMake, libclang).
+whisper = ["dep:whisper-rs"]
+# NVIDIA Parakeet TDT 0.6B v2 through Sherpa-ONNX. Ships onnxruntime as shared libraries.
+parakeet = ["dep:sherpa-onnx"]
+
+[dependencies]
+kodiak-core = { path = "../kodiak-core", version = "0.1.0" }
+sherpa-onnx = { version = "=2.0.2", default-features = false, features = ["shared"], optional = true }
+whisper-rs = { version = "0.16", optional = true }
+
+[dev-dependencies]
+hound = "3.5"
+kodiak-intent = { path = "../kodiak-intent", version = "0.1.0" }
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

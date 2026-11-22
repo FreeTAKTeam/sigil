@@ -1,11 +1,19 @@
 [processing]
 parallel_voice_bss = true
 correlation_timeout_ms = 5000
+# A VR-N76 may send its BSS packet as a separate burst 1-2.5 s after the
+# voice. Packets starting within this gap still identify the speaker.
+trailing_id_gap_ms = 3000
 
 [identity]
 auto_register = true
 registry_path = "data/identities"
 allowlist = ["Corvo", "BLACKY"]
+# Publish speech that carried no BSS ID from a separate gateway identity.
+# It never uses a radio's identity, and MECP or contact reports from it are
+# still ignored because it has no GPS position.
+unidentified_sender = false
+unidentified_name = "Unidentified radio"
 
 [fabric]
 tcp_clients = []
@@ -16,3 +24,21 @@ enabled = false
 destination_hash = ""
 send_chat = true
 send_telemetry = true
+# Publish Kodiak voice commands: MECP reports, contact markers and RCH commands.
+send_intents = true
+
+[kodiak]
+# Activation word spellings as the speech recognizer writes them.
+wake_words = ["kodiak", "kodiac", "codiak", "codiac", "codeiac"]
+# Clock-direction contact reports need a verified compass heading. Enable only
+# if your radios report a compass heading in BSS, not GPS course over ground.
+bss_heading_is_compass = false
+# Command recognition: "deterministic" (vocabulary rules) or "laya" (a laya
+# typed-decision model checked against the rules; needs a `--features laya`
+# build and about 1.6 GB of RAM). laya also recovers a misheard activation
+# word such as "Kardiac" when it is confident.
+classifier = "deterministic"
+# laya checkpoint directory (relative to this file) and the calibrated
+# probability every answer must reach.
+laya_checkpoint = "models/laya/english"
+laya_threshold = 0.85

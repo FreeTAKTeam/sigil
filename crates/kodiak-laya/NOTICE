@@ -1,0 +1,10 @@
+kodiak-laya uses laya-candle (https://github.com/Trystan-SA/laya-candle),
+Copyright its authors, licensed under the Apache License, Version 2.0, a
+Rust port of Laya (https://github.com/NandhaKishorM/laya).
+
+The laya checkpoints (https://huggingface.co/convaiinnovations/laya) are not
+distributed with Kodiak; they are downloaded separately under their own terms.
+
+kodiak-laya itself is GPL-2.0-or-later. The Apache License 2.0 is compatible
+with GPL version 3 but not version 2, so a binary that links laya-candle is
+distributed under the terms of GPL version 3 or later.

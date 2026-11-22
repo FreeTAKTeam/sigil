@@ -1,0 +1,11 @@
+# kodiak-core
+
+Contracts and the processing engine of R3AKT Kodiak, an offline voice-command engine.
+
+- `Engine::process_audio(&AudioInput)`: transcribes the audio, checks for the activation word, then classifies. Returns `Result<KodiakResult, KodiakError>`.
+- `Engine::process_text(&TextInput)`: starts at the activation-word check. Returns `KodiakResult`.
+- `KodiakResult` is `Chat`, `Intent` (MECP report, contact report or RCH command) or `Rejected`. Its JSON form is the versioned contract `kodiak.result.v1`.
+- `Transcriber` and `IntentClassifier` are the replaceable parts. `kodiak-asr` and `kodiak-intent` provide implementations.
+- `WakeWord` matches "Kodiak" as a distinct, case-insensitive word, plus the spellings that the bundled recognizers were observed to produce.
+
+There are no features. Dependencies are `serde` and `serde_json` only. See `docs/kodiak.md` in the workspace for the full contract.

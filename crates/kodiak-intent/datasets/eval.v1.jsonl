@@ -1,0 +1,94 @@
+{"text": "We need more food at the camp.", "expect": {"type": "chat", "content": "We need more food at the camp."}}
+{"text": "Kodiak. Urgent. Need Food.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"severity": 1, "code": "S02", "content": "MECP/1/S02"}}}
+{"text": "Kodiak urgent need water", "expect": {"type": "intent", "intent": "mecp.report", "data": {"severity": 1, "code": "S01", "content": "MECP/1/S01"}}}
+{"text": "Kodiak mayday severe bleeding", "expect": {"type": "intent", "intent": "mecp.report", "data": {"severity": 0, "code": "M06", "content": "MECP/0/M06"}}}
+{"text": "Kodiak safety all clear", "expect": {"type": "intent", "intent": "mecp.report", "data": {"severity": 2, "code": "R07", "content": "MECP/2/R07"}}}
+{"text": "Kodiak hostile three thirty two hundred meters.", "expect": {"type": "intent", "category": "marker", "intent": "contact.report", "data": {"affiliation": "hostile", "direction_type": "relative_clock", "relative_bearing_deg": 105, "distance_m": 200}}}
+{"text": "Kodiak list users.", "expect": {"type": "intent", "category": "rch", "intent": "mission.users", "data": {}}}
+{"text": "Kodiak, mayday, we have a heart attack.", "expect": {"type": "intent", "data": {"code": "M04", "content": "MECP/0/M04"}}}
+{"text": "Kodiak urgent, someone is unconscious", "expect": {"type": "intent", "data": {"code": "M02", "content": "MECP/1/M02"}}}
+{"text": "Kodiak urgent unconscious person", "expect": {"type": "intent", "data": {"code": "M02", "content": "MECP/1/M02"}}}
+{"text": "Kodiak mayday, multiple casualties at the bridge", "expect": {"type": "rejected", "reason": "invalid_parameter"}}
+{"text": "Kodiak mayday multiple casualties", "expect": {"type": "intent", "data": {"content": "MECP/0/M09"}}}
+{"text": "Kodiak urgent road blocked", "expect": {"type": "intent", "data": {"content": "MECP/1/T01"}}}
+{"text": "Kodiak urgent vehicle fire", "expect": {"type": "intent", "data": {"content": "MECP/1/T17"}}}
+{"text": "Kodiak mayday fire", "expect": {"type": "intent", "data": {"content": "MECP/0/T07"}}}
+{"text": "Kodiak routine coffee", "expect": {"type": "intent", "data": {"content": "MECP/3/L02"}}}
+{"text": "Kodiak safety we have water available", "expect": {"type": "intent", "data": {"content": "MECP/2/H01"}}}
+{"text": "Kodiak safety have shelter for 12 people", "expect": {"type": "intent", "data": {"code": "H07", "content": "MECP/2/H07 12pax"}}}
+{"text": "Kodiak safety ETA fifteen minutes", "expect": {"type": "intent", "data": {"code": "R03", "content": "MECP/2/R03 15"}}}
+{"text": "Kodiak urgent low battery", "expect": {"type": "intent", "data": {"content": "MECP/1/S04"}}}
+{"text": "Kodiak urgent need medication", "expect": {"type": "intent", "data": {"content": "MECP/1/S03"}}}
+{"text": "Kodiak mayday gunfire", "expect": {"type": "intent", "data": {"content": "MECP/0/X03"}}}
+{"text": "Kodiak safety this is a drill", "expect": {"type": "intent", "data": {"content": "MECP/2/D01"}}}
+{"text": "Kodiak safety end of drill", "expect": {"type": "intent", "data": {"content": "MECP/2/D03"}}}
+{"text": "Kodiak safety I am OK", "expect": {"type": "intent", "data": {"content": "MECP/2/B03"}}}
+{"text": "Kodiak mayday SOS", "expect": {"type": "intent", "data": {"content": "MECP/0/B01"}}}
+{"text": "Kodiak urgent we are lost", "expect": {"type": "intent", "data": {"content": "MECP/1/P06"}}}
+{"text": "Kodiak urgent need food and water", "expect": {"type": "rejected", "category": "mecp", "reason": "ambiguous"}}
+{"text": "Kodiak need food", "expect": {"type": "rejected", "category": "mecp", "reason": "missing_parameter"}}
+{"text": "Kodiak urgent", "expect": {"type": "rejected", "category": "mecp", "reason": "missing_parameter"}}
+{"text": "Kodiak urgent mayday bleeding", "expect": {"type": "rejected", "reason": "ambiguous"}}
+{"text": "Kodiak friendly nine o'clock 500 meters", "expect": {"type": "intent", "intent": "contact.report", "data": {"affiliation": "friendly", "direction_type": "relative_clock", "relative_bearing_deg": 270, "distance_m": 500}}}
+{"text": "Kodiak enemy twelve o'clock one point five kilometers", "expect": {"type": "intent", "data": {"affiliation": "hostile", "relative_bearing_deg": 0, "distance_m": 1500}}}
+{"text": "Kodiak hostile half past one, 300 m", "expect": {"type": "intent", "data": {"relative_bearing_deg": 45, "distance_m": 300}}}
+{"text": "Kodiak hostile 3:30 200m", "expect": {"type": "intent", "data": {"relative_bearing_deg": 105, "distance_m": 200}}}
+{"text": "Kodiak hostile three o'clock thirty two hundred meters", "expect": {"type": "intent", "data": {"relative_bearing_deg": 90, "distance_m": 3200}}}
+{"text": "Kodiak suspect bearing two seven zero, 800 meters", "expect": {"type": "intent", "data": {"affiliation": "suspect", "direction_type": "compass_bearing", "bearing_deg": 270, "distance_m": 800}}}
+{"text": "Kodiak neutral northeast 2 km", "expect": {"type": "intent", "data": {"affiliation": "neutral", "direction_type": "compass_bearing", "bearing_deg": 45, "distance_m": 2000}}}
+{"text": "Kodiak unknown bearing 120 degrees 400 meters", "expect": {"type": "intent", "data": {"affiliation": "unknown", "bearing_deg": 120, "distance_m": 400}}}
+{"text": "Kodiak contact, two hostile vehicles, ten o'clock, 600 meters, moving north", "expect": {"type": "intent", "data": {"affiliation": "hostile", "relative_bearing_deg": 300, "distance_m": 600, "classification": "vehicle", "quantity": 2, "activity": "moving north"}}}
+{"text": "Kodiak hostile five infantry two o'clock four hundred meters digging", "expect": {"type": "intent", "data": {"relative_bearing_deg": 60, "distance_m": 400, "classification": "infantry", "quantity": 5, "activity": "digging"}}}
+{"text": "Kodiak hostile drone six o'clock a hundred metres", "expect": {"type": "intent", "data": {"relative_bearing_deg": 180, "distance_m": 100, "classification": "drone"}}}
+{"text": "Kodiak hostile two hundred meters", "expect": {"type": "rejected", "category": "marker", "reason": "missing_parameter"}}
+{"text": "Kodiak hostile three o'clock", "expect": {"type": "rejected", "category": "marker", "reason": "missing_parameter"}}
+{"text": "Kodiak three o'clock two hundred meters", "expect": {"type": "rejected", "reason": "no_intent"}}
+{"text": "Kodiak hostile quarter past three 200 meters", "expect": {"type": "rejected", "reason": "invalid_parameter"}}
+{"text": "Kodiak hostile 3:15 200 meters", "expect": {"type": "rejected", "reason": "invalid_parameter"}}
+{"text": "Kodiak hostile thirteen o'clock 200 meters", "expect": {"type": "rejected", "reason": "invalid_parameter"}}
+{"text": "Kodiak hostile three o'clock 500 kilometers", "expect": {"type": "rejected", "reason": "invalid_parameter"}}
+{"text": "Kodiak hostile three o'clock bearing 090 200 meters", "expect": {"type": "rejected", "reason": "ambiguous"}}
+{"text": "Kodiak hostile three o'clock 200 meters 300 meters", "expect": {"type": "rejected", "reason": "ambiguous"}}
+{"text": "Kodiak help", "expect": {"type": "intent", "category": "rch", "intent": "help", "data": {}}}
+{"text": "Kodiak, join the mission.", "expect": {"type": "intent", "intent": "mission.join"}}
+{"text": "Kodiak leave", "expect": {"type": "intent", "intent": "mission.leave"}}
+{"text": "Kodiak pause", "expect": {"type": "intent", "intent": "mission.pause"}}
+{"text": "Kodiak resume", "expect": {"type": "intent", "intent": "mission.resume"}}
+{"text": "Kodiak set nickname to Bravo Six", "expect": {"type": "intent", "intent": "mission.nick", "data": {"nickname": "Bravo Six"}}}
+{"text": "Kodiak call me Eagle", "expect": {"type": "intent", "intent": "mission.nick", "data": {"nickname": "Eagle"}}}
+{"text": "Kodiak who is online", "expect": {"type": "intent", "intent": "mission.users"}}
+{"text": "Kodiak list missions", "expect": {"type": "intent", "intent": "mission.registry.mission.list", "data": {}}}
+{"text": "Kodiak list markers", "expect": {"type": "intent", "intent": "mission.marker.list"}}
+{"text": "Kodiak list events", "expect": {"type": "intent", "intent": "mission.events.list"}}
+{"text": "Kodiak read E.A.M. status", "expect": {"type": "intent", "intent": "mission.registry.eam.list"}}
+{"text": "Kodiak list active checklists", "expect": {"type": "intent", "intent": "checklist.list.active"}}
+{"text": "Kodiak please list markers", "expect": {"type": "intent", "intent": "mission.marker.list"}}
+{"text": "Kodiak mission time remaining", "expect": {"type": "intent", "category": "rch", "intent": "mission.time", "data": {}}}
+{"text": "Kodiak, how much time is left?", "expect": {"type": "intent", "intent": "mission.time", "data": {}}}
+{"text": "Kodiak search mission library for flood plans", "expect": {"type": "intent", "category": "rch", "intent": "mission.library.list", "data": {"search": "flood plans"}}}
+{"text": "Kodiak list library", "expect": {"type": "intent", "intent": "mission.library.list", "data": {}}}
+{"text": "Kodiak search library for", "expect": {"type": "rejected", "category": "rch", "reason": "missing_parameter"}}
+{"text": "Kodiak nickname", "expect": {"type": "rejected", "category": "rch", "reason": "missing_parameter"}}
+{"text": "Kodiak delete all markers", "expect": {"type": "rejected", "reason": "no_intent"}}
+{"text": "Kodiak launch the missiles", "expect": {"type": "rejected", "reason": "no_intent"}}
+{"text": "Kodiak", "expect": {"type": "rejected", "reason": "no_intent"}}
+{"text": "The Kodiaks are moving to the ridge.", "expect": {"type": "chat"}}
+{"text": "Urgent need water at the north gate.", "expect": {"type": "chat"}}
+{"text": "Hey Kodiak, list users", "expect": {"type": "intent", "intent": "mission.users"}}
+{"text": "Kodiak Hostel 330 200 meters", "expect": {"type": "intent", "data": {"affiliation": "hostile", "relative_bearing_deg": 105, "distance_m": 200}}}
+{"text": "Kodiak hostile 1030 1.5 km", "expect": {"type": "intent", "data": {"relative_bearing_deg": 315, "distance_m": 1500}}}
+{"text": "Kodiak hostile 1200 meters", "expect": {"type": "rejected", "category": "marker", "reason": "missing_parameter"}}
+{"text": "Kodiak hostile 315 200 meters", "expect": {"type": "rejected", "reason": "invalid_parameter"}}
+{"text": "Codeiac. Safety. All clear.", "expect": {"type": "intent", "data": {"content": "MECP/2/R07"}}}
+{"text": "Kodiak May Day needs water.", "expect": {"type": "intent", "category": "mecp", "intent": "mecp.report", "data": {"severity": 0, "code": "S01", "content": "MECP/0/S01"}}}
+{"text": "Kodiak Maydays need water.", "expect": {"type": "intent", "data": {"severity": 0, "code": "S01", "content": "MECP/0/S01"}}}
+{"text": "Kodiak may they need water", "expect": {"type": "intent", "data": {"content": "MECP/0/S01"}}}
+{"text": "Kodiak may days need water", "expect": {"type": "intent", "data": {"content": "MECP/0/S01"}}}
+{"text": "Kodiak Mayday meet water.", "expect": {"type": "intent", "data": {"severity": 0, "code": "S01", "content": "MECP/0/S01"}, "corrections": [{"heard": "meet", "read_as": "need"}]}}
+{"text": "Kodiak urgent need wader", "expect": {"type": "intent", "data": {"content": "MECP/1/S01"}, "corrections": [{"heard": "wader", "read_as": "water"}]}}
+{"text": "Kodiak hostyle three o'clock 200 meeters", "expect": {"type": "intent", "data": {"affiliation": "hostile", "relative_bearing_deg": 90, "distance_m": 200}, "corrections": [{"heard": "hostyle", "read_as": "hostile"}, {"heard": "meeters", "read_as": "meters"}]}}
+{"text": "Kodiak lisst users", "expect": {"type": "intent", "intent": "mission.users", "corrections": [{"heard": "lisst", "read_as": "list"}]}}
+{"text": "Kodiak mayday we don't need water anymore", "expect": {"type": "rejected", "category": "mecp", "reason": "invalid_parameter"}}
+{"text": "Kodiak mayday deed water", "expect": {"type": "rejected", "reason": "ambiguous", "corrections": [{"heard": "deed", "read_as": "dead"}]}}
+{"text": "Kodiak urgent need fod", "expect": {"type": "rejected", "reason": "missing_parameter"}}
+{"text": "Kodiak call me Bravo Sicks", "expect": {"type": "intent", "intent": "mission.nick", "data": {"nickname": "Bravo Sicks"}}}

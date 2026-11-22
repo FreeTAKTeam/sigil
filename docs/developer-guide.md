@@ -4,14 +4,14 @@ This guide explains how the code works, for people changing it. For installing a
 
 ## What the program does
 
-`r3akt-sigil` is a single Rust binary (edition 2024, toolchain 1.96.0, `unsafe_code = "forbid"`). It:
+`r3akt-sigil` is a Rust binary (edition 2024, toolchain 1.96.0, `unsafe_code = "forbid"`). Its workspace also holds the three packages of the R3AKT Kodiak voice-command engine under `crates/`, which will later move to their own repository ([docs/kodiak.md](kodiak.md), [KODIAK_EXTRACTION.md](../KODIAK_EXTRACTION.md)). Sigil:
 
 1. Tunes a USB RTL-SDR to one analog narrowband FM channel. The default is 435.9950 MHz.
 2. Demodulates FM and splits the discriminator output into two paths: speech-band voice audio and unfiltered audio for the data modem.
-3. Cuts voice into clips by squelch and transcribes each clip offline with whisper.cpp or, optionally, NVIDIA Parakeet TDT v2 through Sherpa-ONNX.
+3. Cuts voice into clips by squelch and passes each clip to Kodiak. Kodiak transcribes it offline with whisper.cpp or, optionally, NVIDIA Parakeet TDT v2 through Sherpa-ONNX, then returns chat, a voice-command intent or a rejection.
 4. Decodes BSS packets (Bell 202 AFSK, HDLC, CRC-16/X.25) that radios such as the VR-N76 send on PTT release. The packets carry a sender ID and, optionally, a GPS position.
 5. Attributes each transcript to the radio whose BSS ID trails it. It writes every result as an atomic JSON event on disk.
-6. Optionally publishes the events to a Reticulum Community Hub (RCH) over LXMF. Each allowlisted radio gets its own persistent, encrypted Reticulum identity.
+6. Optionally publishes the events to a Reticulum Community Hub (RCH) over LXMF: chat, positions, MECP reports, contact markers and RCH commands. Each allowlisted radio gets its own persistent, encrypted Reticulum identity.
 
 ## Repository layout
 
@@ -23,7 +23,7 @@ This guide explains how the code works, for people changing it. For installing a
 | `src/processing.rs` | Multi-threaded pipeline: ingress, voice and BSS workers, ASR worker, event coordinator, BSS masking |
 | `src/bss.rs` | AFSK demodulation, HDLC framing, CRC check, BSS TLV parsing, de-duplication, diagnostics |
 | `src/correlation.rs` | `sdr.gateway.v1` event model, radio ID normalization, trailing-ID attribution |
-| `src/transcription.rs` | Whisper and Parakeet recognizer backends |
+| `src/intents.rs` | Turns Kodiak results into RCH messages: position and heading rules, contact geodesy, field-9 command encoding |
 | `src/audio.rs` | WAV read, downmix, FFT resampling to 16 kHz, WAV write |
 | `src/output.rs` | Output directory, atomic JSON and WAV writes, console logging |
 | `src/replay.rs` | `gateway-wav`: replays a discriminator capture through the full pipeline |
@@ -31,6 +31,11 @@ This guide explains how the code works, for people changing it. For installing a
 | `src/identity.rs` | Encrypted per-radio Reticulum identity registry |
 | `src/publisher.rs` | Embedded LXMF publisher with a persistent delivery journal |
 | `src/telemetry.rs` | Builds the LXMF telemetry field (`0x02`) for RCH map positions |
+| `crates/kodiak-core` | Kodiak result contract, wake-word gate, `Engine`, `Transcriber` and `IntentClassifier` traits |
+| `crates/kodiak-asr` | Kodiak speech recognizers (Whisper; Parakeet with the `parakeet` feature) |
+| `crates/kodiak-intent` | Kodiak vocabularies, deterministic classifier, datasets, text CLI |
+| `tests/kodiak_isolation.rs` | Fails if a Kodiak package starts depending on Sigil code |
+| `KODIAK_EXTRACTION.md` | How the Kodiak packages move to `FreeTAKTeam/R3AKT-Kodiak` |
 | `send_lxmf.py`, `test_send_lxmf.py` | Legacy standalone publisher using Fabric's HTTP API, with its tests |
 | `gateway.example.toml` | Template for embedded-gateway settings |
 | `lxmf.toml` | Settings for the legacy Python publisher |
@@ -44,8 +49,8 @@ Global options apply to every subcommand.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--backend whisper\|parakeet` | `whisper` | ASR backend. `parakeet` exists only in builds with `--features parakeet`. |
-| `--model PATH` | `models/ggml-base.en.bin` or `models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8` | Whisper model file or Parakeet model directory. The default is relative to the working directory. |
+| `--backend parakeet\|whisper` | `parakeet` | ASR backend. Parakeet TDT v2 (English, 0.6B, INT8) is the default; a build with `--no-default-features` has Whisper only and defaults to it. |
+| `--model PATH` | `models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8` or `models/ggml-base.en.bin` | Whisper model file or Parakeet model directory. The default is relative to the working directory. |
 | `--frequency-hz N` | `435995000` | Tuned frequency. In WAV modes it only labels output. |
 | `--output-dir DIR` | `transcripts` | Destination for all JSON and WAV output |
 | `--save-wav` | off | Save each voice clip as a 16 kHz mono 16-bit WAV |
@@ -77,7 +82,7 @@ flowchart LR
 ```
 
 - **Squelch calibration.** Without `--squelch-dbfs`, the receiver discards 5 settling blocks. It then measures the remaining blocks of the first second and sets the threshold to the median level plus 8 dB, clamped to −120…0 dBFS. With a manual threshold it only skips the 5 settling blocks.
-- **Short USB reads** are reassembled into whole 40,960-byte blocks so that I/Q pairing is preserved.
+- **USB reader thread.** A dedicated thread reads 256 KB (128 ms) USB transfers and queues up to 32 of them for the DSP, so the dongle is drained even while a block is processed. Transfers are reassembled into 40,960-byte blocks, preserving I/Q pairing. If the DSP falls more than the queue behind, whole transfers are dropped and logged as `Signal processing fell behind`.
 - **`--monitor-power`** logs the peak channel level, the threshold, and whether squelch opened, once per second.
 
 ## Voice capture (`capture.rs`)
@@ -118,7 +123,7 @@ flowchart TD
 1. **`event`** updates the watermarks: `voice_through` and `data_through`, the highest block index each lane has fully processed. Every new, non-duplicate BSS packet with a valid sender is persisted immediately as `radio_seen`, or as `position` if it carries a location. Telemetry never waits for ASR.
 2. **`dispatch`** releases a completed clip to ASR only after the BSS lane has caught up past the clip's end. Then BSS bursts inside the clip can be masked. It then:
    - zeroes every block inside a BSS mask (packet span ± 3 guard blocks);
-   - after the last mask, zeroes blocks below 0.009 RMS, which removes the quiet carrier tail that radios leave open after the AFSK burst;
+   - after the last mask, zeroes blocks below 0.009 RMS, which removes the quiet carrier tail that radios leave open after the AFSK burst, and counts speech as resumed only after 100 ms (5 blocks) of continuous audio, so a stray noise block cannot extend the speech past a trailing packet;
    - recomputes the audible span and drops the clip if fewer than 5 audible blocks remain. That case is a pure data burst and is logged as "BSS burst excluded from speech recognition".
    - It names the job `voice-<started_at>-<first_frame>` and sends it to ASR with a non-blocking send. A full queue is recorded as a failure.
 3. **`settle`** attributes each pending transcript once both watermarks pass `span.end + window`. It writes the event when both text and attribution are known. It also expires history older than `MAX_CLIP_FRAMES + 2 × window`.
@@ -132,7 +137,7 @@ The run ends when both lanes report `Done` and nothing is waiting or pending. Ct
 `window = ceil(correlation_timeout_ms / 20)` blocks, 250 by default. `AudioHistory::resolve` picks the BSS packet that **trails** the speech:
 
 - The packet starts no earlier than one block before the audible span ends, and ends within `window` blocks after it.
-- The packet starts within 300 ms (15 blocks) after the last RF-open block of the clip.
+- The packet starts within the trailing-ID gap after the last RF-open block of the clip: `[processing].trailing_id_gap_ms` or `--trailing-id-gap-ms`, default 3,000 ms (150 blocks). On 21 November 2026 a VR-N76 sent its packet as a separate burst 1.1 s and, in a later session, about 2.4 s after the voice; the earlier fixed 300 ms rejected both.
 - The sender normalizes through `radio_id`: trimmed, 1–32 characters of `[A-Za-z0-9_-]` starting alphanumeric, upper-cased. A sender such as `../../R4` is rejected.
 
 The result is one of:
@@ -141,14 +146,14 @@ The result is one of:
 |---|---|
 | `Attribution` | Exactly one normalized ID qualifies |
 | `missing_identifier` | No packet qualifies, or BSS is not enabled |
-| `ambiguous_identifier` | Two different IDs qualify; another voice clip could also own the packet or overlaps it; or a new voice clip started between this speech and the packet |
+| `ambiguous_identifier` | Two different IDs qualify (a packet starting within 300 ms of the carrier's end, inside the speaker's own transmission, takes precedence over packets in separate later bursts); another voice clip could also own the packet or overlaps it; or a new voice clip started between this speech and the packet |
 | `incomplete_audio` | A dropped-block gap overlaps the window, or the input ended before the window closed |
 
 Leading IDs (BSS sent on PTT press) are deliberately not used.
 
 ## BSS decoding (`bss.rs`)
 
-- **Modem.** `yodel` provides the Bell 202 AFSK demodulator (1200 baud, 1200/2200 Hz) and NRZI decoding. The crate implements its own `Framer`, because BSS payloads can be shorter than the AX.25 minimum that Yodel's HDLC layer enforces.
+- **Modem.** `yodel` provides the Bell 202 AFSK demodulator (1200 baud, 1200/2200 Hz) and NRZI decoding. Raw discriminator recordings from 20 and 21 November 2026 show both test radios keying at 1,200 baud (fitted 1,196–1,202). A bank of decoders at 1,224–1,272 baud and a de-emphasized profile, run in parallel on the same recordings, recovered no packet that the single 1,200-baud decoder missed, so the decoder stays single-rate. See "Lost BSS frames" in [docs/kodiak.md](kodiak.md) for how dropped USB samples broke frames. The crate implements its own `Framer`, because BSS payloads can be shorter than the AX.25 minimum that Yodel's HDLC layer enforces.
 - **Framing.** A frame lies between `0x7E` flags. Seven consecutive ones is an abort. Frames are capped at 4,096 bits. `frame_bytes` removes stuffed bits (LSB-first), requires byte alignment, and checks the little-endian CRC-16/X.25 FCS.
 - **Candidates.** Only frames whose first byte is the BSS marker `0x01` are parsed. A frame that also has a valid CRC, or at least 3 preamble flags, produces a voice mask even when its CRC fails. A corrupted burst is still removed from the speech audio.
 - **Payload.** After the `0x01` marker, the payload is a sequence of TLVs with the layout `len, type, value[len-1]`:
@@ -168,11 +173,14 @@ Leading IDs (BSS sent on PTT press) are deliberately not used.
 - **De-duplication.** An identical payload within 10 s of audio is not written again. It is still returned with `duplicate: true`, so it can help attribution.
 - **Diagnostics.** With `--bss-diagnostics`, rejected candidates are written as `bss-diagnostic_*.json` with the recovered bit string.
 
-## Transcription (`transcription.rs`)
+## Transcription and voice commands (Kodiak)
 
-- **Whisper.** CPU only, greedy decoding, English, `no_context`, blank and non-speech tokens suppressed. The model loads lazily on the first clip in `listen`.
+`main.rs` builds one `kodiak_core::Engine` per process. It combines the `DeterministicClassifier` with a `kodiak-asr` recognizer that loads on the first clip, and the ASR worker calls `Engine::process_audio` for each clip.
+
+- **Whisper.** CPU only, greedy decoding, English, `no_context`, blank and non-speech tokens suppressed.
 - **Parakeet.** Sherpa-ONNX `nemo_transducer`. The model directory needs `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt`.
 - Both backends use up to 4 threads and collapse whitespace in the output.
+- **Result types.** Without the activation word "Kodiak", the result is chat. With it, the result is an MECP report, a contact report, an RCH command or a structured rejection. See [docs/kodiak.md](kodiak.md) for the contract, the vocabularies and the limitations.
 
 ## Output files
 
@@ -180,7 +188,7 @@ Leading IDs (BSS sent on PTT press) are deliberately not used.
 
 | File | Schema | Written by |
 |---|---|---|
-| `<ts>_<hz>_<rand>.json` (+ `.wav`) | Plain transcript: `started_at`, `ended_at`, `transcribed_at`, `frequency_hz`, `source`, `audio_duration_ms`, `text`, `audio_file?` | Every transcribed clip (`Output::transcribe`) |
+| `<ts>_<hz>_<rand>.json` (+ `.wav`) | Plain transcript: `started_at`, `ended_at`, `transcribed_at`, `frequency_hz`, `source`, `audio_duration_ms`, `text`, `audio_file?`, `kodiak` (the `kodiak.result.v1` result) | Every transcribed clip (`Output::transcribe`) |
 | `bss_*.json` | `sdr.bss.v1`: `protocol`, `timestamp`, `frequency_hz`, `source`, `audio_sample_offset`, `sample_rate_hz`, `payload_hex`, plus the parsed packet fields | Each new verified BSS packet |
 | `bss-diagnostic_*.json` | `sdr.bss.diagnostic.v1`: `error`, `hdlc_bits`, … | Rejected candidates with `--bss-diagnostics` |
 | `gateway_*.json` | `sdr.gateway.v1`: `id`, `timestamp`, `frequency_hz`, `source`, `kind`, plus kind-specific fields | Coordinator (see below) |
@@ -191,7 +199,7 @@ Leading IDs (BSS sent on PTT press) are deliberately not used.
 |---|---|
 | `radio_seen` | `radio_id`, `display_name` |
 | `position` | `radio_id`, `display_name`, `position{latitude, longitude, altitude_m?, speed_kmh?, heading_deg?}` |
-| `transcript` | `radio_id?`, `display_name?`, `bss_event_id?`, `unresolved_reason?`, `started_at`, `text`. Blank transcripts are not written. |
+| `transcript` | `radio_id?`, `display_name?`, `bss_event_id?`, `unresolved_reason?`, `started_at`, `text`, `position?` (the GPS fix in the attributed BSS packet), `kodiak?` (the Kodiak result). Blank transcripts are not written. |
 | `processing_failure` | `stage` (`voice_capture`, `bss` or `asr`), `detail` |
 
 In `listen`, the coordinator writes `gateway_*.json` even without `--config` or BSS. In that case every transcript carries `unresolved_reason: "missing_identifier"`.
@@ -204,26 +212,37 @@ In `listen`, the coordinator writes `gateway_*.json` even without `--config` or 
 |---|---|---|
 | `[processing].parallel_voice_bss` | `true` | Enables the BSS lane when a config file is given |
 | `[processing].correlation_timeout_ms` | `5000` | 200–30000. `--correlation-timeout-ms` overrides it. |
+| `[processing].trailing_id_gap_ms` | `3000` | Longest gap between the end of speech and a BSS packet that still identifies the speaker. At most `correlation_timeout_ms`. `--trailing-id-gap-ms` overrides it. |
 | `[identity].auto_register` | `false` | Create keys for allowlisted radios on first sight |
 | `[identity].registry_path` | `data/identities` | |
 | `[identity].allowlist` | `[]` | Normalized with `radio_id`. Required when RCH is enabled. |
+| `[identity].unidentified_sender` | `false` | Publish transcripts that carried no BSS ID (`missing_identifier`) from a separate gateway identity instead of keeping them local. Ambiguous or incomplete attributions are never published. |
+| `[identity].unidentified_name` | `Unidentified radio` | Display name announced for that identity |
 | `[fabric].tcp_clients` | `[]` | `host:port` Reticulum TCP interfaces. Required when RCH is enabled. |
 | `[fabric].local_storage_path` | `data/fabric` | |
 | `[rch].enabled` | `false` | Requires `R3AKT_IDENTITY_PASSPHRASE` (at least 16 bytes) in the environment |
 | `[rch].destination_hash` | `""` | 32 hex characters: the hub's `lxmf.delivery` hash |
-| `[rch].send_chat`, `[rch].send_telemetry` | `true`, `true` | At least one must be `true` |
+| `[rch].send_chat`, `[rch].send_telemetry`, `[rch].send_intents` | `true`, `true`, `true` | At least one must be `true`. `send_intents` publishes Kodiak MECP reports, contact markers and RCH commands. |
+| `[kodiak].wake_words` | `kodiak` plus the observed recognizer spellings | Accepted spellings of the activation word |
+| `[kodiak].bss_heading_is_compass` | `false` | Treat the BSS heading as a verified compass heading. It is required for clock-direction contact reports. |
 
 ## Identity registry (`identity.rs`)
 
-Directory contents:
+The registry is one SQLite database, `radios.sqlite3`, in `[identity].registry_path`, plus `registry.lock`, an exclusive file lock held while it is open.
 
-- `registry.lock`: an exclusive file lock held while the registry is open.
-- `salt.bin`: 16 random bytes. If it is missing while `.identity` or `.json` files exist, opening fails instead of silently re-keying.
-- `transport.identity`: the node identity for the shared Reticulum transport.
-- `radio-<ID>.identity`: the encrypted private key, stored as `"R3AKT-ID\x01" ‖ 24-byte nonce ‖ XChaCha20-Poly1305(8-byte BE creation time ‖ 64-byte key)`. The AAD is the format tag plus the slot name, so files cannot be swapped between slots. The key is Argon2id (19 MiB, t=2, p=1) of the passphrase and salt.
-- `radio-<ID>.json`: public metadata: `bss_id`, `display_name`, `bss_authenticated: false`, `rns_identity_ref`, `lxmf_destination`, `registered_at`, `last_seen`, `last_position`.
+| Table | Contents |
+|---|---|
+| `radios` | `bss_id` (normalized), `display_name`, `lxmf_destination` (unique), `identity_source` (`generated` or `imported`), `registered_at`, `last_seen`, `last_position` (JSON) |
+| `identities` | `slot` (`radio-<ID>`, `transport`, `unidentified`) and the sealed private key |
+| `meta` | `schema_version`, the 16-byte Argon2 `salt`, and a sealed `key_check` |
 
-`observe(id, name, …)` returns a key only if `name` normalizes to `id` and `id` is allowlisted. It creates a key only on first sight with `auto_register`. It also checks that the metadata matches the key: same ID, same destination hash, and same creation time. A corrupted or mismatched key is an error and is never regenerated.
+- **Key sealing.** Each key is stored as `"R3AKT-ID\x01" ‖ 24-byte nonce ‖ XChaCha20-Poly1305(8-byte BE creation time ‖ 64-byte key)`. The associated data is the format tag plus the slot name, so sealed keys cannot be swapped between slots. The encryption key is Argon2id (19 MiB, t=2, p=1) of the passphrase and salt.
+- **Passphrase check.** `key_check` is verified when the registry opens, so a wrong passphrase fails at start-up rather than on first use.
+- **Lookups.** `observe(id, name, …)` returns a key only if `name` normalizes to `id` and `id` is allowlisted. A registered radio always uses its stored identity, generated or imported. An unregistered radio gets a new generated identity only with `auto_register`. The stored LXMF address must match the key; a corrupted or mismatched key is an error and is never regenerated.
+- **Imported identities.** `import` assigns an existing 64-byte Reticulum identity (as Sideband, REM or `rnid` save it, or the same as hex). An identity cannot be assigned to two radios or be one of the gateway's own identities, and replacing a radio's identity needs `--replace`.
+- **Migration.** A registry kept as files by earlier versions (`salt.bin`, `*.identity`, `radio-*.json`) is migrated on first open. Sealed keys are copied unchanged and verified with the passphrase, each radio's key must reproduce its recorded address, and only then are the old files moved to `legacy-files/`. If anything fails, the new database is removed and the files are left as they were.
+
+Manage the registry with `r3akt-sigil radios --config <gateway.toml> list | add <ID> | import <ID> --identity-file <file> [--replace] | remove <ID> --yes`. It needs `R3AKT_IDENTITY_PASSPHRASE` and cannot run while a gateway holds the registry lock.
 
 ## Embedded publisher (`publisher.rs`)
 
@@ -240,7 +259,8 @@ stateDiagram-v2
     queued --> transport_confirmed: receipt or resource transfer
     awaiting_proof --> transport_confirmed: receipt arrives
     queued --> policy_rejected: radio not allowlisted / no key
-    queued --> no_message: radio_seen, or chat/telemetry disabled
+    queued --> no_message: radio_seen, or chat/telemetry/intents disabled
+    queued --> ignored: Kodiak rejection, no GPS fix, or no verified heading
     queued --> expired: older than 7 days
     awaiting_proof --> expired
 ```
@@ -249,7 +269,13 @@ Retries back off at `min(3 × 2^attempts, 300)` seconds. Each radio has its own 
 
 **Message content.**
 
-- A transcript becomes a chat message with the body `Radio: <name>\nFrequency: <MHz>\nTime: <RFC3339>\n\n<text>`.
+- A transcript without a Kodiak intent becomes a chat message with the body `Radio: <name>\nFrequency: <MHz>\nTime: <RFC3339>\n\n<text>`.
+- A transcript with a Kodiak intent goes through `intents::plan`, which produces one of three messages, all sent with LXMF field `0x09` (`FIELD_COMMANDS`) and message kind `Application`:
+  - an MECP report becomes `mission.registry.log_entry.upsert` with the position appended;
+  - a contact report becomes `mission.marker.create` at the computed contact position;
+  - an RCH command is forwarded with its own name, so RCH authorizes it.
+- A Kodiak rejection is recorded as `ignored` in the journal, with the reason in `detail`, and nothing is sent.
+- **Position rule:** use the current BSS fix, otherwise the radio's last valid fix (`Registry::last_position`). With neither, the report is ignored.
 - A position becomes an empty-content message with field `0x02`. `telemetry::fields` builds it from `r3akt-map-core`'s time and Information sensors plus a named `location` projection with latitude, longitude, timestamp, and altitude, speed and bearing when known. It does not include accuracy. It round-trips the result through RCH's decoder before sending.
 
 ## Legacy Python publisher
@@ -261,9 +287,10 @@ Its SQLite outbox (`.lxmf-outbox.sqlite3`) tracks jobs through `pending`, `sendi
 ## Building, testing, packaging
 
 ```powershell
-cargo build --release --locked                     # Whisper only
-cargo build --release --locked --features parakeet # adds Parakeet
-cargo test  --release --locked
+cargo build --release --locked                        # Parakeet (default) and Whisper
+cargo build --release --locked --no-default-features  # Whisper only
+cargo test  --release --locked --workspace
+cargo run -p kodiak-intent --example kodiak_text -- "Kodiak list users"
 python -m unittest -v test_send_lxmf
 ```
 
@@ -280,7 +307,10 @@ The Rust tests are hardware-free and synthesize their own signals:
 | `processing::*` | Carrier-tail masking. Telemetry is not blocked by slow ASR, and the trailing ID is attributed end to end. |
 | `identity::*` | Distinct keys, lock exclusivity, restart, backup restore, corruption detection |
 | `telemetry::*` | RCH decodes a sparse location without a fabricated accuracy |
-| `publisher::*` | Loopback Reticulum peer receives signed chat and telemetry from two radio identities. Identities survive a restart. |
+| `publisher::*` | Loopback Reticulum peer receives signed chat and telemetry from two radio identities, plus a Kodiak RCH command as field 9. A rejected Kodiak command is not sent. Identities survive a restart. |
+| `intents::*` | Contact geodesy, the position fallback, the heading rule, MECP and marker field commands, RCH pass-through |
+| `tests/kodiak_isolation.rs` | Kodiak packages reference no Sigil, LXMF, Reticulum or SDR code |
+| `kodiak-*` packages | Result contract, wake word, shared lazy model, 94-case evaluation set, fuzzy correction, about 1,000 generated utterances. See [docs/kodiak.md](kodiak.md). |
 
 `scripts/package-windows.ps1 [-WhisperOnly] [-ModelPath …]` and `scripts/package-linux.sh [model]` build a release and bundle the binary, the runtime DLLs (Parakeet on Windows), `gateway.example.toml`, the README, `docs/architecture.md`, `docs/developer-guide.md`, the license and an optional model into `dist/`.
 
@@ -292,7 +322,7 @@ The Rust tests are hardware-free and synthesize their own signals:
 | USB driver | `librtlsdr-rs` 0.3.0 (bundled libusb via `rusb`) |
 | LXMF, Fabric runtime, Reticulum transport | `FreeTAKTeam/LXMF-rs` @ `008bf9e` |
 | RCH telemetry codec | `r3akt-map-core` from `FreeTAKTeam/Reticulum-Community-Hub` @ `82f72e9` |
-| ASR | `whisper-rs` 0.16; `sherpa-onnx` 2.0.2 (optional) |
+| ASR (in `kodiak-asr`) | `whisper-rs` 0.16; `sherpa-onnx` 2.0.2 (optional) |
 | AFSK modem | `yodel` 0.2.0 |
 
 ## Notes for contributors
@@ -301,4 +331,4 @@ The Rust tests are hardware-free and synthesize their own signals:
 - Every on-disk write must stay atomic: use `Output::save_event` or `identity::write_atomic`. The publisher and external tools read the directory concurrently.
 - `sdr.*` schema names are a contract with the publisher and downstream tools. Bump the version suffix on incompatible changes.
 - BSS is unauthenticated. The allowlist and registry decide only which gateway key signs a message. They do not prove who transmitted it.
-- The project folder is not currently a git repository.
+- Kodiak packages must not depend on Sigil. `tests/kodiak_isolation.rs` enforces this; see [KODIAK_EXTRACTION.md](../KODIAK_EXTRACTION.md).

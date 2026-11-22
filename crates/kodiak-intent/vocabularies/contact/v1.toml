@@ -1,0 +1,119 @@
+# Kodiak contact (marker) report vocabulary, version 1.
+#
+# A contact report needs an affiliation, exactly one direction (clock position
+# or compass bearing) and a distance. Classification, quantity and activity are
+# optional. Kodiak extracts the report only; the gateway supplies the
+# observer's position and heading and computes the contact position.
+#
+# Clock positions accept whole and half hours: "three", "three o'clock",
+# "three thirty", "3:30", "half past three". A number directly after the
+# clock hour is read as the half hour, so "three thirty two hundred meters" is
+# 3:30 at 200 m. Say "three o'clock thirty two hundred meters" for 3,200 m.
+# Recognizers often write clock positions as digits: "330" is 3:30 and "1030"
+# is 10:30 when no distance unit follows.
+
+schema = "kodiak.vocabulary.contact"
+version = 1
+
+fillers = ["contact", "contacts", "at", "my", "our", "the", "a", "an", "of", "is", "are",
+  "about", "approximately", "approx", "roughly", "around", "range", "distance", "direction",
+  "spotted", "sighted", "observed", "seen", "report", "there", "and", "with", "from", "me",
+  "us", "located", "position", "possible", "possibly", "to", "on", "plus", "away"]
+
+# Largest accepted distance in metres.
+max_distance_m = 100000
+
+# Words that introduce an explicit compass bearing in degrees.
+bearing_words = ["bearing", "azimuth", "compass"]
+
+[affiliations]
+friendly = ["friendly", "friendlies", "friend", "friends", "blue"]
+# "hostel" is how both bundled recognizers transcribed a synthesized "hostile".
+hostile = ["hostile", "hostiles", "enemy", "enemies", "hostel", "hostels"]
+neutral = ["neutral", "neutrals"]
+unknown = ["unknown", "unidentified"]
+suspect = ["suspect", "suspected", "suspicious"]
+
+# Spoken word -> canonical classification.
+[classifications]
+person = "person"
+persons = "person"
+people = "person"
+personnel = "person"
+individual = "person"
+individuals = "person"
+man = "person"
+men = "person"
+infantry = "infantry"
+troops = "infantry"
+soldier = "infantry"
+soldiers = "infantry"
+vehicle = "vehicle"
+vehicles = "vehicle"
+car = "vehicle"
+cars = "vehicle"
+truck = "vehicle"
+trucks = "vehicle"
+armor = "armor"
+armour = "armor"
+tank = "armor"
+tanks = "armor"
+drone = "drone"
+drones = "drone"
+uav = "drone"
+uavs = "drone"
+aircraft = "aircraft"
+helicopter = "aircraft"
+helicopters = "aircraft"
+boat = "boat"
+boats = "boat"
+group = "group"
+animal = "animal"
+animals = "animal"
+
+# Spoken word -> canonical activity. "moving", "heading" and "travelling"
+# may be followed by a compass point, which then belongs to the activity.
+[activities]
+moving = "moving"
+heading = "moving"
+travelling = "moving"
+traveling = "moving"
+stationary = "stationary"
+static = "stationary"
+stopped = "stationary"
+approaching = "approaching"
+advancing = "approaching"
+retreating = "retreating"
+withdrawing = "retreating"
+digging = "digging"
+firing = "firing"
+shooting = "firing"
+observing = "observing"
+watching = "observing"
+patrolling = "patrolling"
+
+[units]
+m = 1.0
+meter = 1.0
+meters = 1.0
+metre = 1.0
+metres = 1.0
+km = 1000.0
+kilometer = 1000.0
+kilometers = 1000.0
+kilometre = 1000.0
+kilometres = 1000.0
+klick = 1000.0
+klicks = 1000.0
+click = 1000.0
+clicks = 1000.0
+
+[compass_points]
+north = 0
+northeast = 45
+east = 90
+southeast = 135
+south = 180
+southwest = 225
+west = 270
+northwest = 315

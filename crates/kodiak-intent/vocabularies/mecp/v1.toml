@@ -1,0 +1,600 @@
+# Kodiak MECP voice vocabulary, version 1.
+#
+# Codes, labels and severities follow the canonical MECP tables:
+#   REM  apps/mobile/src/utils/mecp.ts               (commit 3e1e172)
+#   RCH  crates/r3akt-profile-rch/src/lib.rs          (commit c2bf78a)
+# Kodiak only adds spoken phrases. It does not redefine the protocol.
+# B04 (Household / community status) exists in REM only; RCH reports it as an
+# unknown code, so it is not offered by voice.
+#
+# Phrases are lower-case word sequences. Punctuation and apostrophes split
+# words ("can't" is "can t"). When phrases overlap, the longest match wins;
+# two different codes in one command are rejected as ambiguous.
+
+schema = "kodiak.vocabulary.mecp"
+version = 1
+
+# Words that may surround an MECP report without changing its meaning.
+fillers = ["we", "i", "a", "an", "the", "is", "are", "am", "please", "more", "some",
+  "now", "here", "there", "at", "our", "my", "location", "report", "mecp", "event",
+  "has", "have", "got", "been", "it", "and", "very", "badly", "need", "needed", "requires",
+  "someone", "for", "in", "needs"]
+
+[[severities]]
+level = 0
+label = "Mayday"
+# Parakeet transcribed a spoken "mayday" over live NFM as "May Day" and, from
+# the saved WAV of the same transmission, as "may they".
+words = ["mayday", "may day", "may they"]
+
+[[severities]]
+level = 1
+label = "Urgent"
+words = ["urgent", "urgently"]
+
+[[severities]]
+level = 2
+label = "Safety"
+words = ["safety"]
+
+[[severities]]
+level = 3
+label = "Routine"
+# An operator said "normal" for routine over live NFM (21 November 2026).
+words = ["routine", "normal"]
+
+# Medical
+[[codes]]
+code = "M01"
+label = "Injury"
+phrases = ["injury", "injured", "someone injured", "person injured", "hurt", "someone hurt"]
+
+[[codes]]
+code = "M02"
+label = "Unconscious person"
+phrases = ["unconscious", "unconscious person", "person unconscious", "unresponsive"]
+
+[[codes]]
+code = "M03"
+label = "Breathing difficulty"
+phrases = ["breathing difficulty", "difficulty breathing", "trouble breathing", "cannot breathe", "can not breathe", "not breathing"]
+
+[[codes]]
+code = "M04"
+label = "Cardiac event"
+phrases = ["cardiac", "cardiac event", "cardiac arrest", "heart attack"]
+
+[[codes]]
+code = "M05"
+label = "Hypothermia"
+phrases = ["hypothermia", "hypothermic"]
+
+[[codes]]
+code = "M06"
+label = "Severe bleeding"
+phrases = ["severe bleeding", "bleeding", "heavy bleeding"]
+
+[[codes]]
+code = "M07"
+label = "Fracture / immobile"
+phrases = ["fracture", "broken bone", "broken leg", "broken arm", "immobile", "cannot walk", "can not walk"]
+
+[[codes]]
+code = "M08"
+label = "Burns"
+phrases = ["burns", "burn", "burned", "burnt"]
+
+[[codes]]
+code = "M09"
+label = "Multiple casualties"
+phrases = ["multiple casualties", "mass casualty", "mass casualties", "several casualties", "casualties"]
+
+[[codes]]
+code = "M10"
+label = "Deceased"
+phrases = ["deceased", "dead", "fatality", "fatalities", "body found"]
+
+[[codes]]
+code = "M11"
+label = "Animal bite / sting"
+phrases = ["animal bite", "bite", "bitten", "sting", "stung", "snake bite", "dog bite", "bee sting"]
+
+[[codes]]
+code = "M12"
+label = "Allergic reaction / anaphylaxis"
+phrases = ["allergic reaction", "anaphylaxis", "anaphylactic", "allergy"]
+
+[[codes]]
+code = "M13"
+label = "Poisoning / toxic exposure"
+phrases = ["poisoning", "poisoned", "toxic exposure", "poison"]
+
+[[codes]]
+code = "M14"
+label = "Persons located alive"
+phrases = ["persons located alive", "person located alive", "located alive", "found alive", "survivors found", "survivor found"]
+
+[[codes]]
+code = "M15"
+label = "Area searched, no victims found"
+phrases = ["area searched", "no victims", "no victims found", "area searched no victims", "area searched no victims found"]
+
+# Terrain / Infrastructure
+[[codes]]
+code = "T01"
+label = "Road blocked"
+phrases = ["road blocked", "road block", "roadblock", "blocked road"]
+
+[[codes]]
+code = "T02"
+label = "Bridge out"
+phrases = ["bridge out", "bridge down", "bridge collapsed", "bridge washed out"]
+
+[[codes]]
+code = "T03"
+label = "Building collapsed"
+phrases = ["building collapsed", "building collapse", "collapsed building", "structure collapse"]
+
+[[codes]]
+code = "T04"
+label = "Flooding"
+phrases = ["flooding", "flood", "flooded"]
+
+[[codes]]
+code = "T05"
+label = "Landslide"
+phrases = ["landslide", "mudslide", "rockslide", "rock slide"]
+
+[[codes]]
+code = "T06"
+label = "Power out"
+phrases = ["power out", "power outage", "no power", "blackout"]
+
+[[codes]]
+code = "T07"
+label = "Fire"
+phrases = ["fire", "wildfire", "forest fire", "building on fire"]
+
+[[codes]]
+code = "T08"
+label = "Avalanche"
+phrases = ["avalanche"]
+
+[[codes]]
+code = "T09"
+label = "Path impassable"
+phrases = ["path impassable", "trail impassable", "impassable", "path blocked", "trail blocked"]
+
+[[codes]]
+code = "T10"
+label = "Shelter available"
+phrases = ["shelter available"]
+
+[[codes]]
+code = "T11"
+label = "Drowning / water rescue needed"
+phrases = ["drowning", "water rescue", "water rescue needed", "person in the water", "man overboard"]
+
+[[codes]]
+code = "T12"
+label = "Water contamination"
+phrases = ["water contamination", "contaminated water", "water contaminated", "unsafe water"]
+
+[[codes]]
+code = "T13"
+label = "Earthquake"
+phrases = ["earthquake", "quake", "tremor"]
+
+[[codes]]
+code = "T14"
+label = "Gas leak"
+phrases = ["gas leak", "smell gas", "leaking gas"]
+
+[[codes]]
+code = "T15"
+label = "Chemical spill / HAZMAT"
+phrases = ["chemical spill", "hazmat", "haz mat", "hazardous materials", "chemical leak"]
+
+[[codes]]
+code = "T16"
+label = "Vehicle accident"
+phrases = ["vehicle accident", "car accident", "car crash", "traffic accident", "vehicle crash", "crash"]
+
+[[codes]]
+code = "T17"
+label = "Vehicle fire"
+phrases = ["vehicle fire", "car fire", "car on fire", "vehicle on fire"]
+
+# Weather / Environment
+[[codes]]
+code = "W01"
+label = "Storm approaching"
+phrases = ["storm approaching", "storm", "storm coming", "incoming storm", "thunderstorm"]
+
+[[codes]]
+code = "W02"
+label = "Visibility zero"
+phrases = ["visibility zero", "zero visibility", "no visibility", "whiteout", "dense fog"]
+
+[[codes]]
+code = "W03"
+label = "Extreme cold"
+phrases = ["extreme cold", "freezing"]
+
+[[codes]]
+code = "W04"
+label = "Extreme heat"
+phrases = ["extreme heat", "heat wave", "heatwave"]
+
+[[codes]]
+code = "W05"
+label = "Air quality danger"
+phrases = ["air quality danger", "air quality", "smoke", "toxic air", "bad air"]
+
+[[codes]]
+code = "W06"
+label = "Tsunami / tidal surge warning"
+phrases = ["tsunami", "tsunami warning", "tidal surge", "storm surge"]
+
+# Supplies
+[[codes]]
+code = "S01"
+label = "Need water"
+phrases = ["need water", "water", "drinking water", "out of water", "no water"]
+
+[[codes]]
+code = "S02"
+label = "Need food"
+phrases = ["need food", "food", "out of food", "no food"]
+
+[[codes]]
+code = "S03"
+label = "Need medication"
+phrases = ["need medication", "medication", "medicine", "meds"]
+
+[[codes]]
+code = "S04"
+label = "Need battery / power"
+phrases = ["need battery", "need batteries", "battery", "batteries", "need power", "need charging", "low battery"]
+
+[[codes]]
+code = "S05"
+label = "Need fuel"
+phrases = ["need fuel", "fuel", "need gas", "out of fuel", "need petrol"]
+
+[[codes]]
+code = "S06"
+label = "Need tools / equipment"
+phrases = ["need tools", "need equipment", "tools", "equipment"]
+
+# Position / Movement
+[[codes]]
+code = "P01"
+label = "Stranded / stuck"
+phrases = ["stranded", "stuck", "trapped"]
+
+[[codes]]
+code = "P02"
+label = "Evacuating toward"
+phrases = ["evacuating", "evacuation", "evacuating toward", "evacuating towards"]
+
+[[codes]]
+code = "P03"
+label = "Sheltering in place"
+phrases = ["sheltering in place", "shelter in place", "sheltering"]
+
+[[codes]]
+code = "P04"
+label = "En route to"
+phrases = ["en route", "enroute", "on route", "on the way", "on our way"]
+
+[[codes]]
+code = "P05"
+label = "At GPS coordinates"
+phrases = ["at gps coordinates", "gps coordinates", "coordinates"]
+
+[[codes]]
+code = "P06"
+label = "Lost"
+phrases = ["lost"]
+
+[[codes]]
+code = "P07"
+label = "Group separated"
+phrases = ["group separated", "separated", "someone missing", "person missing", "missing person", "lost contact with"]
+
+# Coordination
+[[codes]]
+code = "C01"
+label = "Send rescue"
+phrases = ["send rescue", "rescue", "need rescue", "send help", "need help", "help"]
+
+[[codes]]
+code = "C02"
+label = "Need transport"
+phrases = ["need transport", "transport", "need a ride", "need vehicle", "need a vehicle"]
+
+[[codes]]
+code = "C03"
+label = "Relay this message"
+phrases = ["relay this message", "relay message", "relay"]
+
+[[codes]]
+code = "C04"
+label = "Confirm received"
+phrases = ["confirm received", "confirm receipt", "please confirm", "confirm"]
+
+[[codes]]
+code = "C05"
+label = "How many people"
+phrases = ["how many people", "how many"]
+
+[[codes]]
+code = "C06"
+label = "What is status"
+phrases = ["what is status", "what is your status", "what is the status", "status check"]
+
+[[codes]]
+code = "C07"
+label = "Can you reach"
+phrases = ["can you reach", "can you reach us", "can anyone reach"]
+
+[[codes]]
+code = "C08"
+label = "Rendezvous at"
+phrases = ["rendezvous", "rendezvous at", "meet at", "meeting point"]
+
+# Response
+[[codes]]
+code = "R01"
+label = "Acknowledged"
+phrases = ["acknowledged", "acknowledge", "copy", "roger", "received"]
+
+[[codes]]
+code = "R02"
+label = "Help coming"
+phrases = ["help coming", "help is coming", "help on the way", "help is on the way"]
+
+[[codes]]
+code = "R03"
+label = "ETA [minutes]"
+phrases = ["eta", "e t a", "estimated time of arrival", "arriving in"]
+# Accepts an optional number of minutes, encoded as a bare number token.
+argument = "eta_minutes"
+
+[[codes]]
+code = "R04"
+label = "Cannot assist"
+phrases = ["cannot assist", "can not assist", "can t assist", "unable to assist"]
+
+[[codes]]
+code = "R05"
+label = "Redirecting to"
+phrases = ["redirecting", "redirecting to", "redirect"]
+
+[[codes]]
+code = "R06"
+label = "Stand by"
+phrases = ["stand by", "standby", "standing by"]
+
+[[codes]]
+code = "R07"
+label = "Situation resolved / all clear"
+phrases = ["all clear", "situation resolved", "resolved"]
+
+# Drill / Test
+[[codes]]
+code = "D01"
+label = "This is a drill"
+phrases = ["this is a drill", "drill"]
+
+[[codes]]
+code = "D02"
+label = "This is a test"
+phrases = ["this is a test", "test"]
+
+[[codes]]
+code = "D03"
+label = "End of drill"
+phrases = ["end of drill", "end drill", "drill over", "drill complete"]
+
+[[codes]]
+code = "D04"
+label = "Ignore previous - sent in error"
+phrases = ["ignore previous", "sent in error", "ignore last message", "disregard", "disregard last", "cancel previous"]
+
+# Life / Leisure
+[[codes]]
+code = "L01"
+label = "Beer / drinks"
+phrases = ["beer", "beers", "drinks"]
+
+[[codes]]
+code = "L02"
+label = "Coffee"
+phrases = ["coffee"]
+
+[[codes]]
+code = "L03"
+label = "Food ready"
+phrases = ["food ready", "food is ready", "dinner ready", "dinner is ready"]
+
+[[codes]]
+code = "L04"
+label = "Summit reached"
+phrases = ["summit reached", "reached the summit", "at the summit", "summit"]
+
+[[codes]]
+code = "L05"
+label = "At camp"
+phrases = ["at camp", "in camp", "back at camp", "reached camp"]
+
+[[codes]]
+code = "L06"
+label = "Running late"
+phrases = ["running late", "late"]
+
+[[codes]]
+code = "L07"
+label = "Good signal here"
+phrases = ["good signal here", "good signal"]
+
+[[codes]]
+code = "L08"
+label = "Photo opportunity"
+phrases = ["photo opportunity", "photo op"]
+
+[[codes]]
+code = "L09"
+label = "Wildlife spotted"
+phrases = ["wildlife spotted", "wildlife"]
+
+[[codes]]
+code = "L10"
+label = "Beautiful view"
+phrases = ["beautiful view", "nice view", "great view"]
+
+[[codes]]
+code = "L11"
+label = "Trail conditions good"
+phrases = ["trail conditions good", "trail good", "trail is good"]
+
+[[codes]]
+code = "L12"
+label = "Trail conditions bad"
+phrases = ["trail conditions bad", "trail bad", "trail is bad"]
+
+[[codes]]
+code = "L13"
+label = "Need a break"
+phrases = ["need a break", "need break"]
+
+[[codes]]
+code = "L14"
+label = "Heading home"
+phrases = ["heading home", "going home", "returning home"]
+
+[[codes]]
+code = "L15"
+label = "Good morning / check-in"
+phrases = ["good morning", "check in", "checking in"]
+
+[[codes]]
+code = "L16"
+label = "Good night"
+phrases = ["good night", "goodnight"]
+
+[[codes]]
+code = "L17"
+label = "Thank you"
+phrases = ["thank you", "thanks"]
+
+[[codes]]
+code = "L18"
+label = "Having fun"
+phrases = ["having fun"]
+
+[[codes]]
+code = "L19"
+label = "Festival / event here"
+phrases = ["festival", "festival here", "event here"]
+
+[[codes]]
+code = "L20"
+label = "Node test / ping"
+phrases = ["node test", "ping"]
+
+# Threat / Security
+[[codes]]
+code = "X01"
+label = "Dangerous person / threat nearby"
+phrases = ["dangerous person", "threat nearby", "threat", "armed person"]
+
+[[codes]]
+code = "X02"
+label = "Area unsafe - avoid"
+phrases = ["area unsafe", "unsafe area", "avoid area", "avoid the area"]
+
+[[codes]]
+code = "X03"
+label = "Gunfire / explosions heard"
+phrases = ["gunfire", "gunshots", "shots fired", "shooting", "explosion", "explosions"]
+
+[[codes]]
+code = "X04"
+label = "Civil unrest / crowd danger"
+phrases = ["civil unrest", "unrest", "riot", "crowd danger", "dangerous crowd"]
+
+[[codes]]
+code = "X05"
+label = "Theft / looting reported"
+phrases = ["theft", "looting", "looters", "robbery"]
+
+[[codes]]
+code = "X06"
+label = "Authorities / emergency services present"
+phrases = ["authorities present", "emergency services present", "authorities", "emergency services", "police", "police present"]
+
+[[codes]]
+code = "X07"
+label = "Checkpoint / road closure"
+phrases = ["checkpoint", "road closure"]
+
+# Have / Offer Resources
+[[codes]]
+code = "H01"
+label = "Have water available"
+phrases = ["have water", "have water available", "water available"]
+
+[[codes]]
+code = "H02"
+label = "Have food available"
+phrases = ["have food", "have food available", "food available"]
+
+[[codes]]
+code = "H03"
+label = "Have medical supplies"
+phrases = ["have medical supplies", "have medical", "medical supplies available"]
+
+[[codes]]
+code = "H04"
+label = "Have power / charging"
+phrases = ["have power", "have charging", "power available", "charging available"]
+
+[[codes]]
+code = "H05"
+label = "Have fuel"
+phrases = ["have fuel", "fuel available"]
+
+[[codes]]
+code = "H06"
+label = "Have tools / equipment"
+phrases = ["have tools", "have equipment", "tools available", "equipment available"]
+
+[[codes]]
+code = "H07"
+label = "Have shelter / space for [N]pax"
+phrases = ["have shelter", "have space", "space available", "shelter for", "space for"]
+# Accepts an optional number of people, encoded as an Npax token.
+argument = "pax"
+
+[[codes]]
+code = "H08"
+label = "Have transport / vehicle"
+phrases = ["have transport", "have vehicle", "have a vehicle", "transport available"]
+
+# Beacon
+[[codes]]
+code = "B01"
+label = "Automated distress beacon active"
+phrases = ["distress beacon", "distress beacon active", "beacon active", "sos", "s o s"]
+
+[[codes]]
+code = "B02"
+label = "Beacon acknowledged"
+phrases = ["beacon acknowledged", "beacon received"]
+
+[[codes]]
+code = "B03"
+label = "Cancel beacon - I am OK"
+phrases = ["cancel beacon", "i am ok", "i am okay", "we are ok", "we are okay"]

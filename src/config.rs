@@ -13,6 +13,49 @@ pub struct Config {
     pub identity: Identity,
     pub fabric: Fabric,
     pub rch: Rch,
+    pub kodiak: Kodiak,
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Kodiak {
+    /// Spellings of the activation word as the recognizer writes them.
+    pub wake_words: Vec<String>,
+    /// Treat the BSS heading as a verified compass heading. BSS radios may
+    /// report GPS course over ground instead, so this is off by default and
+    /// clock-direction contact reports are then ignored.
+    pub bss_heading_is_compass: bool,
+    /// Which intent classifier reads commands.
+    pub classifier: Classifier,
+    /// laya checkpoint directory, relative to the configuration file.
+    pub laya_checkpoint: PathBuf,
+    /// Minimum calibrated probability for laya to confirm or add an intent.
+    pub laya_threshold: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Classifier {
+    /// Rule-based vocabulary matching.
+    #[default]
+    Deterministic,
+    /// laya typed decisions checked against the rules (`--features laya`).
+    Laya,
+}
+
+impl Default for Kodiak {
+    fn default() -> Self {
+        Self {
+            wake_words: kodiak_core::DEFAULT_WAKE_FORMS
+                .iter()
+                .map(|form| (*form).to_owned())
+                .collect(),
+            bss_heading_is_compass: false,
+            classifier: Classifier::Deterministic,
+            laya_checkpoint: PathBuf::from("models/laya/english"),
+            laya_threshold: 0.85,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -20,13 +63,16 @@ pub struct Config {
 pub struct Processing {
     pub parallel_voice_bss: bool,
     pub correlation_timeout_ms: u64,
+    /// Longest gap between the end of speech and the trailing BSS packet.
+    pub trailing_id_gap_ms: u64,
 }
 
 impl Default for Processing {
     fn default() -> Self {
         Self {
             parallel_voice_bss: true,
-            correlation_timeout_ms: 5_000,
+            correlation_timeout_ms: crate::correlation::Timing::DEFAULT_WINDOW_MS,
+            trailing_id_gap_ms: crate::correlation::Timing::DEFAULT_TRAILING_GAP_MS,
         }
     }
 }
@@ -37,6 +83,19 @@ pub struct Identity {
     pub auto_register: bool,
     pub registry_path: PathBuf,
     pub allowlist: BTreeSet<String>,
+    /// Publish speech that carried no BSS ID from a dedicated gateway
+    /// identity instead of keeping it local.
+    pub unidentified_sender: bool,
+    /// Display name announced for that identity.
+    pub unidentified_name: String,
+}
+
+impl Identity {
+    /// The display name to publish unidentified speech under, if enabled.
+    pub fn unidentified(&self) -> Option<&str> {
+        self.unidentified_sender
+            .then_some(self.unidentified_name.as_str())
+    }
 }
 
 impl Default for Identity {
@@ -45,6 +104,8 @@ impl Default for Identity {
             auto_register: false,
             registry_path: "data/identities".into(),
             allowlist: BTreeSet::new(),
+            unidentified_sender: false,
+            unidentified_name: "Unidentified radio".into(),
         }
     }
 }
@@ -67,11 +128,17 @@ impl Default for Fabric {
 
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent publishing switches"
+)]
 pub struct Rch {
     pub enabled: bool,
     pub destination_hash: String,
     pub send_chat: bool,
     pub send_telemetry: bool,
+    /// Publish Kodiak MECP reports, contact markers and RCH commands.
+    pub send_intents: bool,
 }
 
 impl Default for Rch {
@@ -81,6 +148,7 @@ impl Default for Rch {
             destination_hash: String::new(),
             send_chat: true,
             send_telemetry: true,
+            send_intents: true,
         }
     }
 }
@@ -94,6 +162,10 @@ impl Config {
             (200..=30_000).contains(&config.processing.correlation_timeout_ms),
             "correlation_timeout_ms must be 200–30000"
         );
+        ensure!(
+            config.processing.trailing_id_gap_ms <= config.processing.correlation_timeout_ms,
+            "trailing_id_gap_ms must not exceed correlation_timeout_ms"
+        );
         config.identity.allowlist = config
             .identity
             .allowlist
@@ -102,13 +174,23 @@ impl Config {
                 radio_id(label).with_context(|| format!("invalid BSS allowlist entry {label:?}"))
             })
             .collect::<Result<_>>()?;
+        let name = config.identity.unidentified_name.trim();
+        ensure!(
+            !name.is_empty() && name.len() <= 64 && !name.contains(char::is_control),
+            "unidentified_name must be 1-64 printable characters"
+        );
         let directory = path.parent().unwrap_or_else(|| Path::new("."));
         config.identity.registry_path = directory.join(&config.identity.registry_path);
         config.fabric.local_storage_path = directory.join(&config.fabric.local_storage_path);
+        config.kodiak.laya_checkpoint = directory.join(&config.kodiak.laya_checkpoint);
+        ensure!(
+            config.kodiak.laya_threshold > 0.5 && config.kodiak.laya_threshold <= 1.0,
+            "laya_threshold must be above 0.5 and at most 1"
+        );
         if config.rch.enabled {
             ensure!(
-                config.rch.send_chat || config.rch.send_telemetry,
-                "enable chat or telemetry in [rch]"
+                config.rch.send_chat || config.rch.send_telemetry || config.rch.send_intents,
+                "enable chat, telemetry or intents in [rch]"
             );
             ensure!(
                 !config.identity.allowlist.is_empty(),

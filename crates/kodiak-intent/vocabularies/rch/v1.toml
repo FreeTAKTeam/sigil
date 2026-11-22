@@ -1,0 +1,96 @@
+# Kodiak RCH command vocabulary, version 1.
+#
+# Intent names are the canonical command names of the RCH dispatcher
+# (Reticulum-Community-Hub, Rust edition, main at commit 0a71f4b):
+#   aliasing   crates/r3akt-rch-server/src/durable_broker/envelope/command_alias.rs
+#   commands   crates/r3akt-rch-core/src/lib.rs (supported command lists)
+#   mission.time          crates/r3akt-rch-server/src/durable_broker/mission_time.rs (13284db)
+#   mission.library.list  crates/r3akt-library-core/src/query.rs (e0dba68)
+# The gateway forwards a recognized command to RCH as an ordinary LXMF command
+# from the radio's own identity, so RCH's dispatcher and authorization decide
+# what happens. Kodiak never executes commands.
+#
+# A command must match a phrase completely (after removing "please").
+# Commands with `argument` take every word after the phrase as that argument,
+# after dropping any leading words listed in `argument_lead`.
+
+schema = "kodiak.vocabulary.rch"
+version = 1
+
+fillers = ["please"]
+
+[[commands]]
+intent = "help"
+phrases = ["help", "show help", "list commands", "commands"]
+
+[[commands]]
+intent = "mission.join"
+phrases = ["join", "join mission", "join the mission"]
+
+[[commands]]
+intent = "mission.leave"
+phrases = ["leave", "leave mission", "leave the mission"]
+
+[[commands]]
+intent = "mission.pause"
+phrases = ["pause", "pause mission", "pause messages"]
+
+[[commands]]
+intent = "mission.resume"
+phrases = ["resume", "resume mission", "resume messages"]
+
+[[commands]]
+intent = "mission.nick"
+phrases = ["nickname", "nick", "set nickname", "set nickname to", "set my nickname to", "my nickname is", "call me"]
+argument = "nickname"
+
+[[commands]]
+intent = "mission.users"
+phrases = ["list users", "users", "show users", "list clients", "list members", "who is online"]
+
+[[commands]]
+intent = "mission.registry.mission.list"
+phrases = ["list missions", "missions", "show missions"]
+
+[[commands]]
+intent = "mission.marker.list"
+phrases = ["list markers", "markers", "show markers"]
+
+[[commands]]
+intent = "mission.events.list"
+phrases = ["list events", "events", "show events"]
+
+[[commands]]
+intent = "mission.registry.eam.list"
+phrases = ["eam status", "read eam status", "show eam status", "list eam", "e a m status",
+  "read e a m status", "emergency action message status"]
+
+[[commands]]
+intent = "checklist.list.active"
+phrases = ["list active checklists", "active checklists", "show active checklists",
+  "list checklists", "checklists"]
+
+# `/time`: time left until the latest mission's expiration. RCH also accepts a
+# mission_uid, which is not practical to speak, so Kodiak sends none.
+[[commands]]
+intent = "mission.time"
+phrases = ["mission time remaining", "mission time", "time remaining", "time left",
+  "how much time is left", "how much time is remaining", "time"]
+
+# Mission Library catalog. `search` filters item names; without it RCH lists
+# the authorized items.
+[[commands]]
+intent = "mission.library.list"
+phrases = ["list library", "list mission library", "show library", "show mission library",
+  "mission library", "library"]
+
+[[commands]]
+intent = "mission.library.list"
+phrases = ["search mission library", "search the mission library", "search library",
+  "search the library"]
+argument = "search"
+argument_lead = ["for"]
+
+# Requests that RCH does not provide are listed as [[unsupported]] entries
+# (name, phrases, reason, optional prefix = true) so they are rejected
+# explicitly. There are none at present.

@@ -1,0 +1,24 @@
+[package]
+name = "kodiak-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+license = "GPL-2.0-or-later"
+description = "R3AKT Kodiak: wake-word gating, intent contracts and the voice/text processing engine"
+repository = "https://github.com/FreeTAKTeam/R3AKT-Kodiak"
+
+# Kodiak manifests deliberately avoid `workspace = true` inheritance so the
+# package can move to its own repository unchanged. See KODIAK_EXTRACTION.md.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

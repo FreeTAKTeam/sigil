@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "r3akt-sigil"
 version = "0.1.0"
 edition = "2024"
@@ -7,8 +7,20 @@ publish = false
 license = "GPL-2.0-or-later"
 description = "Headless offline transcription of analog NFM radio"
 
+[workspace]
+# Kodiak packages live here temporarily and will move to FreeTAKTeam/R3AKT-Kodiak.
+# Keep them free of Sigil dependencies; see KODIAK_EXTRACTION.md.
+members = ["crates/kodiak-core", "crates/kodiak-asr", "crates/kodiak-intent", "crates/kodiak-laya"]
+resolver = "3"
+
 [features]
-parakeet = ["dep:sherpa-onnx"]
+# Parakeet TDT v2 is the default recognizer. Build with
+# `--no-default-features` for a Whisper-only binary without ONNX Runtime.
+default = ["parakeet"]
+parakeet = ["kodiak-asr/parakeet"]
+# laya typed-decision command recognition (`[kodiak] classifier = "laya"`).
+# Links Apache-2.0 laya-candle: such binaries are GPLv3-or-later.
+laya = ["dep:kodiak-laya"]
 
 [dependencies]
 anyhow = "1"
@@ -20,6 +32,10 @@ clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3"
 hound = "3.5"
 hex = "0.4"
+kodiak-asr = { path = "crates/kodiak-asr", version = "0.1.0" }
+kodiak-core = { path = "crates/kodiak-core", version = "0.1.0" }
+kodiak-intent = { path = "crates/kodiak-intent", version = "0.1.0" }
+kodiak-laya = { path = "crates/kodiak-laya", version = "0.1.0", optional = true }
 librtlsdr-rs = "=0.3.0"
 lxmf-core = { package = "lxmf-wire", git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "008bf9e1cbc2b3f6859abf21f64dfdb87be8621f" }
 lxmf-runtime = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "008bf9e1cbc2b3f6859abf21f64dfdb87be8621f" }
@@ -30,16 +46,15 @@ rmp-serde = "1"
 rmpv = "1"
 rns-transport = { package = "reticulum-rs-transport", git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "008bf9e1cbc2b3f6859abf21f64dfdb87be8621f" }
 rubato = "0.16"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 rusb = { version = "0.9", features = ["vendored"] }
 sdr-dsp = { git = "https://github.com/jasonherald/rtl-sdr", rev = "4380abf4eb7e74953623d063477f89f9b47876d6" }
 sdr-types = { git = "https://github.com/jasonherald/rtl-sdr", rev = "4380abf4eb7e74953623d063477f89f9b47876d6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sherpa-onnx = { version = "=2.0.2", default-features = false, features = ["shared"], optional = true }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
 toml = "0.8"
-whisper-rs = "0.16"
 yodel = { version = "=0.2.0", default-features = false, features = ["demod", "ax25"] }
 zeroize = "1"
 

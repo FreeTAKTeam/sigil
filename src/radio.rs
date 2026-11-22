@@ -1,9 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use clap::Args;
-use librtlsdr_rs::RtlSdrDevice;
+use librtlsdr_rs::{RtlSdrDevice, RtlSdrReader};
 use sdr_dsp::correction::DcBlocker;
 use sdr_dsp::demod::FmDemod;
 use sdr_dsp::filter::{ComplexFirFilter, DecimatingFirFilter, DeemphasisFilter};
@@ -26,6 +29,10 @@ const AUDIO_DOWNSAMPLE: usize = (IF_RATE / SAMPLE_RATE) as usize;
 const CHANNEL_BANDWIDTH_HZ: f64 = 12_500.0;
 const SQUELCH_MARGIN_DB: f32 = 8.0;
 const RECEIVER_SETTLE_FRAMES: usize = 5;
+/// USB transfer size: the driver's default, 128 ms of I/Q at 1.024 MS/s.
+const USB_TRANSFER_BYTES: usize = 16 * 32 * 512;
+/// Transfers buffered between the USB reader and the DSP: about 4 s.
+const USB_QUEUE: usize = 32;
 
 #[derive(Args)]
 pub struct Settings {
@@ -208,17 +215,86 @@ pub enum Event<'a> {
     },
 }
 
+/// Receives I/Q until `stopped`, calling `on_event` for every 20 ms block.
+///
+/// A dedicated thread only reads USB transfers and hands them over, so the
+/// dongle is drained continuously. Reading and processing on one thread left
+/// a gap after every block in which the dongle's small buffer could overflow;
+/// the lost samples shortened AFSK bits and broke BSS frames on a busy
+/// computer (21 November 2026).
 pub fn receive(
     device: &RtlSdrDevice,
+    nfm: Nfm,
+    calibrate_squelch: bool,
+    monitor_power: bool,
+    stopped: &AtomicBool,
+    on_event: impl FnMut(Event<'_>) -> Result<()>,
+) -> Result<()> {
+    let reader = device.reader();
+    let (filled_tx, filled_rx) = sync_channel::<(Vec<u8>, usize)>(USB_QUEUE);
+    let (spare_tx, spare_rx) = sync_channel::<Vec<u8>>(USB_QUEUE + 2);
+    thread::scope(|scope| {
+        let usb = scope.spawn(move || read_usb(&reader, &filled_tx, &spare_rx, stopped));
+        let result = process(
+            nfm,
+            calibrate_squelch,
+            monitor_power,
+            stopped,
+            &filled_rx,
+            &spare_tx,
+            on_event,
+        );
+        // Unblock and stop the reader whether processing ended or failed.
+        stopped.store(true, Ordering::Relaxed);
+        drop(filled_rx);
+        let usb = usb
+            .join()
+            .map_err(|_| anyhow::anyhow!("USB reader thread panicked"))?;
+        result.and(usb)
+    })
+}
+
+fn read_usb(
+    reader: &RtlSdrReader,
+    filled: &SyncSender<(Vec<u8>, usize)>,
+    spare: &Receiver<Vec<u8>>,
+    stopped: &AtomicBool,
+) -> Result<()> {
+    while !stopped.load(Ordering::Relaxed) {
+        let mut buffer = spare
+            .try_recv()
+            .unwrap_or_else(|_| vec![0; USB_TRANSFER_BYTES]);
+        let count = reader
+            .read_sync(&mut buffer)
+            .context("read I/Q from RTL-SDR")?;
+        ensure!(count > 0, "RTL-SDR ended its I/Q stream");
+        match filled.try_send((buffer, count)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                // The DSP is over USB_QUEUE transfers behind: keep the
+                // dongle drained and report the gap instead of stalling.
+                let lost_ms = count as u64 * 1_000 / (2 * u64::from(USB_RATE));
+                log(format_args!(
+                    "Signal processing fell behind; dropped {lost_ms} ms of I/Q"
+                ));
+            }
+            Err(TrySendError::Disconnected(_)) => break,
+        }
+    }
+    Ok(())
+}
+
+fn process(
     mut nfm: Nfm,
     calibrate_squelch: bool,
     monitor_power: bool,
     stopped: &AtomicBool,
+    filled: &Receiver<(Vec<u8>, usize)>,
+    spare: &SyncSender<Vec<u8>>,
     mut on_event: impl FnMut(Event<'_>) -> Result<()>,
 ) -> Result<()> {
-    let mut usb = vec![0_u8; USB_FRAME_BYTES];
     let mut frame = vec![0_u8; USB_FRAME_BYTES];
-    let mut filled = 0;
+    let mut filled_bytes = 0;
     let mut blocks = 0_usize;
     let blocks_per_second = 1_000 / FRAME_MS;
     let warmup_blocks = if calibrate_squelch {
@@ -231,21 +307,23 @@ pub fn receive(
     let mut open_in_interval = false;
 
     while !stopped.load(Ordering::Relaxed) {
-        let count = device
-            .read_sync(&mut usb)
-            .context("read I/Q from RTL-SDR")?;
-        ensure!(count > 0, "RTL-SDR ended its I/Q stream");
-        let mut input = &usb[..count];
-        // Radios and USB backends may return short reads. Preserve I/Q byte pairing.
+        let (buffer, count) = match filled.recv_timeout(Duration::from_millis(250)) {
+            Ok(transfer) => transfer,
+            Err(RecvTimeoutError::Timeout) => continue,
+            // The reader stopped: it was told to, or its error is joined above.
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        let mut input = &buffer[..count];
+        // Transfers need not align with blocks. Preserve I/Q byte pairing.
         while !input.is_empty() {
-            let take = (USB_FRAME_BYTES - filled).min(input.len());
-            frame[filled..filled + take].copy_from_slice(&input[..take]);
+            let take = (USB_FRAME_BYTES - filled_bytes).min(input.len());
+            frame[filled_bytes..filled_bytes + take].copy_from_slice(&input[..take]);
             input = &input[take..];
-            filled += take;
-            if filled < USB_FRAME_BYTES {
+            filled_bytes += take;
+            if filled_bytes < USB_FRAME_BYTES {
                 continue;
             }
-            filled = 0;
+            filled_bytes = 0;
             nfm.process(&frame)?;
             blocks += 1;
             if blocks <= warmup_blocks {
@@ -289,6 +367,7 @@ pub fn receive(
                 }
             }
         }
+        let _ = spare.try_send(buffer);
     }
     Ok(())
 }

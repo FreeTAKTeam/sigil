@@ -6,10 +6,13 @@ use std::thread;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use kodiak_core::KodiakResult;
 
 use crate::bss::{self, Decoded};
 use crate::capture::{AUDIO_FRAME_LEN, Capture, CaptureEvent, Clip, FRAME_MS};
-use crate::correlation::{Attribution, AudioHistory, GatewayEvent, Kind, Unresolved, radio_id};
+use crate::correlation::{
+    Attribution, AudioHistory, GatewayEvent, Kind, Timing, Unresolved, radio_id,
+};
 use crate::output::{Output, Source, log};
 
 const AUDIO_QUEUE: usize = 256;
@@ -102,7 +105,7 @@ enum Event {
     Done(Lane, Option<String>),
     Inferred {
         id: String,
-        result: Result<String>,
+        result: Result<KodiakResult>,
     },
 }
 
@@ -132,24 +135,25 @@ struct Pending {
     rf_end: u64,
     started_at: DateTime<Utc>,
     ended_at: DateTime<Utc>,
-    text: Option<Result<String>>,
+    text: Option<Result<KodiakResult>>,
     attribution: Option<Result<Attribution, Unresolved>>,
 }
 
 pub fn run<F>(
     output: &Output,
     source: Source,
-    timeout_ms: u64,
+    timing: Timing,
     transcribe: Option<F>,
     decoder: Option<bss::Decoder>,
     input: impl FnOnce(&mut Ingress) -> Result<()>,
 ) -> Result<()>
 where
-    F: FnMut(&Clip) -> Result<String> + Send,
+    F: FnMut(&Clip) -> Result<KodiakResult> + Send,
 {
     let has_voice = transcribe.is_some();
     let has_data = decoder.is_some();
-    let window = timeout_ms.div_ceil(FRAME_MS as u64);
+    let window = timing.window_frames();
+    let gap = timing.gap_frames();
     thread::scope(|scope| {
         let (send_events, events) = sync_channel(EVENT_QUEUE);
         let (send_voice, voice) = sync_channel(AUDIO_QUEUE);
@@ -166,8 +170,10 @@ where
         let data_events = send_events.clone();
         scope.spawn(move || {
             if let Some(decoder) = decoder {
-                let result = catch_unwind(AssertUnwindSafe(|| decode_data(decoder, data, &data_events, output)))
-                    .unwrap_or_else(|_| Err(anyhow::anyhow!("BSS decoder worker panicked")));
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    decode_data(decoder, data, &data_events, output)
+                }))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("BSS decoder worker panicked")));
                 let _ = data_events.send(Event::Done(
                     Lane::Data,
                     result.err().map(|err| format!("{err:#}")),
@@ -179,7 +185,9 @@ where
                 let mut failed = false;
                 for Job { id, clip } in work {
                     let result = if failed {
-                        Err(anyhow::anyhow!("recognition worker is unavailable after a panic"))
+                        Err(anyhow::anyhow!(
+                            "recognition worker is unavailable after a panic"
+                        ))
                     } else {
                         catch_unwind(AssertUnwindSafe(|| transcribe(&clip))).unwrap_or_else(|_| {
                             failed = true;
@@ -193,7 +201,8 @@ where
             }
         });
         let control = scope.spawn(move || {
-            let mut coordinator = Coordinator::new(output, source, window, has_voice, has_data);
+            let mut coordinator =
+                Coordinator::new(output, source, window, gap, has_voice, has_data);
             for event in events {
                 coordinator.event(event);
                 coordinator.dispatch(&jobs);
@@ -320,12 +329,19 @@ struct Coordinator<'a> {
 }
 
 impl<'a> Coordinator<'a> {
-    fn new(output: &'a Output, source: Source, window: u64, voice: bool, data: bool) -> Self {
+    fn new(
+        output: &'a Output,
+        source: Source,
+        window: u64,
+        gap: u64,
+        voice: bool,
+        data: bool,
+    ) -> Self {
         Self {
             output,
             source,
             window,
-            history: AudioHistory::new(window),
+            history: AudioHistory::new(window, gap),
             voice_through: 0,
             data_through: 0,
             voice_done: !voice,
@@ -529,16 +545,17 @@ impl<'a> Coordinator<'a> {
 
     fn complete(&self, pending: Pending) {
         match pending.text {
-            Some(Ok(text)) if !text.trim().is_empty() => {
-                let (radio_id, display_name, bss_event_id, unresolved_reason) =
+            Some(Ok(result)) if !result.transcript().trim().is_empty() => {
+                let (radio_id, display_name, bss_event_id, position, unresolved_reason) =
                     match pending.attribution {
                         Some(Ok(found)) => (
                             Some(found.radio_id),
                             Some(found.display_name),
                             Some(found.packet_id),
+                            found.position,
                             None,
                         ),
-                        Some(Err(reason)) => (None, None, None, Some(reason)),
+                        Some(Err(reason)) => (None, None, None, None, Some(reason)),
                         None => return,
                     };
                 self.persist(
@@ -550,7 +567,9 @@ impl<'a> Coordinator<'a> {
                         bss_event_id,
                         unresolved_reason,
                         started_at: pending.started_at,
-                        text,
+                        text: result.transcript().to_owned(),
+                        position,
+                        kodiak: Some(Box::new(result)),
                     },
                 );
             }
@@ -591,8 +610,13 @@ impl<'a> Coordinator<'a> {
     }
 }
 
+/// Blocks of continuous audio after a BSS burst before speech counts as
+/// resumed. A single noise block after BLACKY's packet on 21 November 2026
+/// otherwise extended the speech past the packet and lost the attribution.
+const RESUMED_SPEECH_FRAMES: usize = 5;
+
 fn mask_audio(clip: &mut Clip, masks: &VecDeque<Range<u64>>) -> Option<Range<u64>> {
-    let mut span = clip.signal_first_frame..clip.signal_last_frame + 1;
+    let span = clip.signal_first_frame..clip.signal_last_frame + 1;
     let Some(masked_until) = masks
         .iter()
         .filter(|mask| mask.start < span.end && mask.end > clip.first_frame)
@@ -601,31 +625,54 @@ fn mask_audio(clip: &mut Clip, masks: &VecDeque<Range<u64>>) -> Option<Range<u64
     else {
         return Some(span);
     };
-    let mut audible = clip
+    let first = clip.first_frame;
+    let mut audible: Vec<bool> = clip
         .audio
         .chunks_mut(AUDIO_FRAME_LEN)
         .enumerate()
-        .filter_map(|(offset, audio)| {
-            let index = clip.first_frame + offset as u64;
+        .map(|(offset, audio)| {
+            let index = first + offset as u64;
             if masks.iter().any(|mask| mask.contains(&index)) {
                 audio.fill(0.0);
-                return None;
+                return false;
             }
             let samples = f32::from(u16::try_from(audio.len()).expect("voice block fits u16"));
             let mean_square = audio.iter().map(|sample| sample * sample).sum::<f32>() / samples;
             // The captured radios keep the carrier open after the AFSK frame.
             // Reject that low-level suffix while retaining speech that resumes.
             let minimum_rms: f32 = if index >= masked_until { 0.009 } else { 0.002 };
-            if index >= masked_until && mean_square < minimum_rms.powi(2) {
-                audio.fill(0.0);
-            }
-            (span.contains(&index) && mean_square >= minimum_rms.powi(2)).then_some(index)
-        });
-    let start = audible.next()?;
-    let mut last = start;
-    let count = 1 + audible.map(|index| last = index).count();
-    span = start..last + 1;
-    (count >= 5).then_some(span)
+            mean_square >= minimum_rms.powi(2)
+        })
+        .collect();
+    // After the last burst, keep only sustained runs: isolated noise blocks
+    // must not extend the speech past a trailing packet.
+    let tail = usize::try_from(masked_until.saturating_sub(first))
+        .unwrap_or(usize::MAX)
+        .min(audible.len());
+    let mut run = None;
+    for offset in tail..=audible.len() {
+        if audible.get(offset).copied().unwrap_or(false) {
+            run.get_or_insert(offset);
+        } else if let Some(begin) = run.take()
+            && offset - begin < RESUMED_SPEECH_FRAMES
+        {
+            audible[begin..offset].fill(false);
+        }
+    }
+    for (offset, audio) in clip.audio.chunks_mut(AUDIO_FRAME_LEN).enumerate() {
+        if offset >= tail && !audible[offset] {
+            audio.fill(0.0);
+        }
+    }
+    let heard: Vec<u64> = audible
+        .iter()
+        .enumerate()
+        .map(|(offset, audible)| (first + offset as u64, *audible))
+        .filter(|(index, audible)| *audible && span.contains(index))
+        .map(|(index, _)| index)
+        .collect();
+    let (&start, &last) = (heard.first()?, heard.last()?);
+    (heard.len() >= 5).then_some(start..last + 1)
 }
 
 #[cfg(test)]
@@ -643,7 +690,7 @@ mod tests {
     #[test]
     fn a_quiet_carrier_tail_does_not_turn_a_trailing_packet_into_a_leading_packet() {
         let now = Utc::now();
-        let masks = VecDeque::from_iter(std::iter::once(20..30));
+        let masks = std::iter::once(20..30).collect::<VecDeque<_>>();
         let mut clip = Clip {
             started_at: now,
             ended_at: now,
@@ -661,6 +708,25 @@ mod tests {
         );
         clip.audio[31 * AUDIO_FRAME_LEN..40 * AUDIO_FRAME_LEN].fill(0.03);
         assert_eq!(mask_audio(&mut clip, &masks), Some(0..40));
+    }
+
+    #[test]
+    fn a_single_noise_block_after_the_packet_does_not_extend_the_speech() {
+        let now = Utc::now();
+        let masks = std::iter::once(20..30).collect::<VecDeque<_>>();
+        let mut clip = Clip {
+            started_at: now,
+            ended_at: now,
+            first_frame: 0,
+            signal_first_frame: 0,
+            signal_last_frame: 39,
+            audio: vec![0.0; AUDIO_FRAME_LEN * 40],
+        };
+        clip.audio[..20 * AUDIO_FRAME_LEN].fill(0.08);
+        // One 20 ms block at RMS 0.010 after the packet, as BLACKY's tail had.
+        clip.audio[37 * AUDIO_FRAME_LEN..38 * AUDIO_FRAME_LEN].fill(0.010);
+        assert_eq!(mask_audio(&mut clip, &masks), Some(0..20));
+        assert!(clip.audio[20 * AUDIO_FRAME_LEN..].iter().all(|s| *s == 0.0));
     }
 
     fn packet(name: [u8; 2]) -> Result<Vec<f32>> {
@@ -700,7 +766,7 @@ mod tests {
         let r4_end = 43 + r4.len().div_ceil(IF_FRAME_LEN);
         let r5_end = 132 + r5.len().div_ceil(IF_FRAME_LEN);
         let start = Utc::now();
-        let recognize = |clip: &Clip| -> Result<String> {
+        let recognize = |clip: &Clip| -> Result<KodiakResult> {
             assert!(clip.audio.iter().any(|value| value.abs() > 0.1));
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
@@ -711,12 +777,17 @@ mod tests {
                 );
                 thread::sleep(Duration::from_millis(10));
             }
-            Ok("Test voice".into())
+            Ok(KodiakResult::Chat {
+                content: "Test voice".into(),
+            })
         };
         run(
             &output,
             Source::Wav,
-            1_000,
+            Timing {
+                window_ms: 1_000,
+                trailing_gap_ms: 300,
+            },
             Some(recognize),
             Some(bss::Decoder::new(IF_RATE, Source::Wav, false, None)?),
             |ingress| {

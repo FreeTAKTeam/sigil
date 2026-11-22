@@ -11,7 +11,7 @@ use crate::capture::{Clip, FRAME_MS};
 use crate::output::{Output, Source};
 use crate::processing;
 use crate::radio::{IF_FRAME_LEN, IF_RATE, VoiceAudio};
-use crate::transcription::Recognizer;
+use kodiak_core::Engine;
 
 #[derive(Clone)]
 pub struct CarrierInterval(Range<u64>);
@@ -32,9 +32,9 @@ impl FromStr for CarrierInterval {
 pub fn run(
     path: &Path,
     carriers: &[CarrierInterval],
-    timeout_ms: u64,
+    timing: crate::correlation::Timing,
     output: &Output,
-    mut recognizer: Recognizer,
+    engine: &Engine,
 ) -> Result<()> {
     let (audio, rate) = audio::read_wav_native(path)?;
     ensure!(
@@ -48,11 +48,11 @@ pub fn run(
     );
     let mut voice = VoiceAudio::new()?;
     let start = Utc::now();
-    let transcribe = |clip: &Clip| output.transcribe(&mut recognizer, clip, Source::Wav);
+    let transcribe = |clip: &Clip| output.transcribe(engine, clip, Source::Wav);
     processing::run(
         output,
         Source::Wav,
-        timeout_ms,
+        timing,
         Some(transcribe),
         Some(Decoder::new(rate, Source::Wav, false, None)?),
         |ingress| {

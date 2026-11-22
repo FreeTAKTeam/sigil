@@ -9,7 +9,7 @@ use tempfile::{Builder, NamedTempFile};
 
 use crate::audio::{SAMPLE_RATE, write_wav};
 use crate::capture::Clip;
-use crate::transcription::Recognizer;
+use kodiak_core::{AudioInput, Engine, KodiakResult};
 
 pub struct Output {
     directory: PathBuf,
@@ -35,6 +35,8 @@ struct Transcript<'a> {
     text: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     audio_file: Option<&'a str>,
+    /// Kodiak's chat, intent or rejection for this transcript.
+    kodiak: &'a KodiakResult,
 }
 
 impl Output {
@@ -92,12 +94,7 @@ impl Output {
         );
     }
 
-    pub fn transcribe(
-        &self,
-        recognizer: &mut Recognizer,
-        clip: &Clip,
-        source: Source,
-    ) -> Result<String> {
+    pub fn transcribe(&self, engine: &Engine, clip: &Clip, source: Source) -> Result<KodiakResult> {
         let prefix = format!(
             "{}_{}_",
             clip.started_at.format("%Y%m%dT%H%M%S%.3fZ"),
@@ -123,13 +120,46 @@ impl Output {
             None
         };
 
-        let text = recognizer.transcribe(&clip.audio)?;
+        let result = engine.process_audio(&AudioInput::mono_16k(clip.audio.clone()))?;
+        let text = result.transcript();
         let now = Utc::now();
         let frequency = frequency_label(self.frequency_hz);
         if text.is_empty() {
             log_at(now, format_args!("{frequency} No speech recognized"));
         } else {
             log_at(now, format_args!("{frequency} Transcript: {text}"));
+        }
+        match &result {
+            KodiakResult::Chat { .. } => {}
+            KodiakResult::Intent {
+                intent,
+                classifier,
+                confidence,
+                ..
+            } => {
+                log(format_args!(
+                    "Kodiak {} intent {} ({classifier}{})",
+                    intent.category(),
+                    intent.name(),
+                    confidence
+                        .map(|p| format!(", confidence {p:.2}"))
+                        .unwrap_or_default()
+                ));
+            }
+            KodiakResult::Rejected { rejection, .. } => log(format_args!(
+                "Kodiak rejected the command ({:?}): {}",
+                rejection.reason, rejection.detail
+            )),
+        }
+        if let KodiakResult::Intent { corrections, .. } | KodiakResult::Rejected { corrections, .. } =
+            &result
+            && !corrections.is_empty()
+        {
+            let heard: Vec<String> = corrections
+                .iter()
+                .map(|c| format!("{:?} as {:?}", c.heard, c.read_as))
+                .collect();
+            log(format_args!("Kodiak read {}", heard.join(", ")));
         }
         let transcript = Transcript {
             started_at: clip.started_at,
@@ -138,18 +168,19 @@ impl Output {
             frequency_hz: self.frequency_hz,
             source,
             audio_duration_ms: u64::try_from(clip.audio.len())? * 1_000 / u64::from(SAMPLE_RATE),
-            text: &text,
+            text,
             audio_file: wav_path
                 .as_deref()
                 .and_then(Path::file_name)
                 .and_then(std::ffi::OsStr::to_str),
+            kodiak: &result,
         };
         serde_json::to_writer_pretty(json.as_file_mut(), &transcript)
             .context("write transcript JSON")?;
         writeln!(json)?;
         persist(json, &json_path)?;
         log(format_args!("Transcript saved to {}", json_path.display()));
-        Ok(text)
+        Ok(result)
     }
 }
 
