@@ -41,7 +41,7 @@ use crate::output::frequency_label;
 use crate::telemetry;
 
 /// Mean Earth radius in metres (IUGG).
-const EARTH_RADIUS_M: f64 = 6_371_008.8;
+pub const EARTH_RADIUS_M: f64 = 6_371_008.8;
 
 /// What the publisher should do with one transcript event.
 #[derive(Debug, PartialEq)]

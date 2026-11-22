@@ -45,3 +45,9 @@ classifier = "deterministic"
 # probability every answer must reach.
 laya_checkpoint = "models/laya/english"
 laya_threshold = 0.85
+
+[receiver]
+# Optional position of the SDR antenna, in decimal degrees (south and west
+# negative). When set, the log shows how far each BSS packet with a GPS fix
+# was from the antenna. Events are unchanged.
+# antenna = { latitude = 43.966633, longitude = -66.125633 }

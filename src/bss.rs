@@ -316,6 +316,16 @@ pub struct Decoder {
     recent: VecDeque<(u64, Vec<u8>, String)>,
     voice_masks: VecDeque<Range<u64>>,
     recording: Option<WavWriter<BufWriter<File>>>,
+    antenna: Option<(f64, f64)>,
+}
+
+/// Great-circle distance in metres between two positions in degrees.
+pub fn ground_distance_m(from: (f64, f64), to: (f64, f64)) -> f64 {
+    let (lat1, lat2) = (from.0.to_radians(), to.0.to_radians());
+    let dlat = lat2 - lat1;
+    let dlon = (to.1 - from.1).to_radians();
+    let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
+    2.0 * crate::intents::EARTH_RADIUS_M * a.sqrt().min(1.0).asin()
 }
 
 impl Decoder {
@@ -355,7 +365,15 @@ impl Decoder {
             recent: VecDeque::new(),
             voice_masks: VecDeque::new(),
             recording,
+            antenna: None,
         })
+    }
+
+    /// Logs each packet's distance from the receiving antenna.
+    #[must_use]
+    pub fn with_antenna(mut self, antenna: Option<(f64, f64)>) -> Self {
+        self.antenna = antenna;
+        self
     }
 
     fn demodulator(sample_rate: u32) -> Result<AfskDemodulator> {
@@ -496,14 +514,27 @@ impl Decoder {
             .context("BSS event filename")?
             .to_string_lossy()
             .into_owned();
+        // Logged only: the distance is not part of the event.
+        let distance = self
+            .distance_from_antenna(decoded.position)
+            .map(|metres| format!(" {metres} m from the antenna,"))
+            .unwrap_or_default();
         crate::output::log(format_args!(
-            "BSS sender {:?} saved to {}",
+            "BSS sender {:?}{distance} saved to {}",
             packet.sender.as_deref().unwrap_or("(absent)"),
             path.display()
         ));
         self.recent
             .push_back((self.sample, payload, decoded.id.clone()));
         Ok(decoded)
+    }
+
+    fn distance_from_antenna(&self, position: Option<Position>) -> Option<u32> {
+        let (antenna, position) = (self.antenna?, position?);
+        let metres = ground_distance_m(antenna, (position.latitude, position.longitude)).round();
+        // Bounded by half the Earth's circumference, so the conversion is exact.
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Some(metres as u32)
     }
 
     fn diagnostic(
@@ -565,6 +596,19 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = "0107204B4B37565A540121062468656C6C6F072514C72DC7CDF1";
+
+    #[test]
+    fn distance_from_the_antenna() {
+        // Antenna and BLACKY's fix from the 22 November 2026 range test.
+        let antenna = (43.966_633, -66.125_633);
+        let blacky = (43.967_467, -66.126_5);
+        let metres = ground_distance_m(antenna, blacky);
+        assert!((110.0..125.0).contains(&metres), "{metres}");
+        assert!(ground_distance_m(antenna, antenna) < 0.001);
+        // One degree of latitude is about 111.2 km.
+        let degree = ground_distance_m((0.0, 0.0), (1.0, 0.0));
+        assert!((degree - 111_195.0).abs() < 10.0, "{degree}");
+    }
 
     #[test]
     fn published_bss_payload_preserves_raw_location() -> Result<()> {

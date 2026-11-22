@@ -226,6 +226,7 @@ In `listen`, the coordinator writes `gateway_*.json` even without `--config` or 
 | `[kodiak].wake_words` | `kodiak` plus the observed recognizer spellings | Accepted spellings of the activation word |
 | `[kodiak].bss_heading_is_compass` | `false` | Treat the BSS heading as a verified compass heading. It is required for clock-direction contact reports. |
 | `[kodiak].marker_max_fix_age_s` | `300` | Oldest stored fix a contact marker may use when its transmission carried no position |
+| `[receiver].antenna` | unset | SDR antenna position, `{ latitude = …, longitude = … }` in decimal degrees. When set, the log shows each BSS packet's distance from the antenna (`BSS sender "Corvo" 116 m from the antenna, saved to …`). Events are unchanged |
 
 ## Identity registry (`identity.rs`)
 
