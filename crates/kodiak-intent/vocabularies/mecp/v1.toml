@@ -17,6 +17,21 @@
 #
 # Revision 2 (22 November 2026): multiple event codes, structured parameters
 # ([parameters], [languages]), negations and conflicts.
+# Revision 3: "injure" (M01), "roadblocked" (T01), "cosign" and "cold sign" as
+# callsign keywords; callsigns and references limited to identifier_words.
+# Revision 4: Terrain aliases "breach out" and "preach out" (T02), "building
+# collapses" (T03), "path/part/pass impossible" and "pass impassable" (T09).
+# Revision 5: "en route to" and "un route two" (P04). Revisions 4 and 5 also
+# add "made a" (mayday), "multiple causality" (M09), "area search" and
+# "no victim found" (M15).
+# Revision 6: "medei" and "may die" (mayday), "con sign" (callsign).
+# Revision 7: "and knowledge" (R01), "eighty a" for ETA (R03), "summit reach"
+# (L04), "good signal ear" (L07), "fort/for opportunity" (L08), "wildlife
+# sport/spot" (L09).
+# Revision 8: printed labels and recorded mishearings for X02, X05, H03, H04,
+# H06, H07, H08 and B01–B03, as whole phrases only.
+# Revision 9: "tidal surge warning", "tsunami tidal surge warning" and "storm
+# surge warning" (W06); "urging" (urgent).
 
 schema = "kodiak.vocabulary.mecp"
 version = 1

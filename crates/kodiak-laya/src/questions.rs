@@ -139,7 +139,10 @@ impl QuestionSet {
         let mut commands: Vec<(String, Vec<String>)> = Vec::new();
         for command in &rch.commands {
             let phrases = command.phrases.iter().take(3).cloned();
-            match commands.iter_mut().find(|(name, _)| *name == command.intent) {
+            match commands
+                .iter_mut()
+                .find(|(name, _)| *name == command.intent)
+            {
                 Some((_, all)) => all.extend(phrases),
                 None => commands.push((command.intent.clone(), phrases.collect())),
             }

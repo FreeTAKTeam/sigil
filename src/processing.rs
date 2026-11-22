@@ -1,10 +1,13 @@
+use std::any::Any;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread;
+use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use kodiak_core::KodiakResult;
 
@@ -19,6 +22,11 @@ const AUDIO_QUEUE: usize = 256;
 const ASR_QUEUE: usize = 16;
 const EVENT_QUEUE: usize = 256;
 const MAX_CLIP_FRAMES: u64 = 30_000 / FRAME_MS as u64 + 16;
+/// Consecutive recognizer panics after which the gateway stops. Kodiak
+/// reloads the model after each panic; repeated panics mean it cannot.
+const MAX_CONSECUTIVE_ASR_PANICS: u32 = 3;
+/// Shortest interval between running drop-count reports.
+const DROP_REPORT_INTERVAL: Duration = Duration::from_mins(1);
 
 struct Frame<T> {
     index: u64,
@@ -33,11 +41,64 @@ pub struct Ingress {
     live: bool,
     voice: Option<SyncSender<VoiceFrame>>,
     data: Option<SyncSender<Frame<Vec<f32>>>>,
-    dropped_voice: u64,
-    dropped_data: u64,
+    /// Blocks lost on USB before the pipeline, and in each lane's queue.
+    dropped: Drops,
+    reported: Drops,
+    reported_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Drops {
+    usb: u64,
+    voice: u64,
+    data: u64,
 }
 
 impl Ingress {
+    fn new(
+        live: bool,
+        voice: Option<SyncSender<VoiceFrame>>,
+        data: Option<SyncSender<Frame<Vec<f32>>>>,
+    ) -> Self {
+        Self {
+            next: 0,
+            live,
+            voice,
+            data,
+            dropped: Drops::default(),
+            reported: Drops::default(),
+            reported_at: None,
+        }
+    }
+
+    /// Skips `frames` block indexes lost before the pipeline. Both lanes
+    /// see the jump and report it as a gap.
+    pub fn skip(&mut self, frames: u64) {
+        self.next = self.next.saturating_add(frames);
+        self.dropped.usb = self.dropped.usb.saturating_add(frames);
+        self.report_drops();
+    }
+
+    fn report_drops(&mut self) {
+        if self.dropped == self.reported
+            || self
+                .reported_at
+                .is_some_and(|at| at.elapsed() < DROP_REPORT_INTERVAL)
+        {
+            return;
+        }
+        self.log_drops();
+        self.reported = self.dropped;
+        self.reported_at = Some(Instant::now());
+    }
+
+    fn log_drops(&self) {
+        let Drops { usb, voice, data } = self.dropped;
+        log(format_args!(
+            "Dropped audio blocks: USB {usb}, voice {voice}, BSS {data}"
+        ));
+    }
+
     pub fn push(
         &mut self,
         open: bool,
@@ -48,7 +109,7 @@ impl Ingress {
         let index = self.next;
         self.next += 1;
         if let Some(voice) = &self.voice {
-            self.dropped_voice += u64::from(!offer(
+            self.dropped.voice += u64::from(!offer(
                 voice,
                 Frame {
                     index,
@@ -59,7 +120,7 @@ impl Ingress {
             ));
         }
         if let Some(data) = &self.data {
-            self.dropped_data += u64::from(!offer(
+            self.dropped.data += u64::from(!offer(
                 data,
                 Frame {
                     index,
@@ -69,6 +130,7 @@ impl Ingress {
                 self.live,
             ));
         }
+        self.report_drops();
     }
 }
 
@@ -97,11 +159,14 @@ enum Event {
         through: u64,
         packets: Vec<Decoded>,
         masks: VecDeque<Range<u64>>,
+        /// Errors the decoder recovered from, such as a failed save.
+        failures: Vec<String>,
     },
     Gap {
         lane: Lane,
         frames: Range<u64>,
     },
+    /// A worker ended; an error is fatal to the gateway.
     Done(Lane, Option<String>),
     Inferred {
         id: String,
@@ -114,6 +179,7 @@ enum Event {
 enum Lane {
     Voice,
     Data,
+    Asr,
 }
 
 impl Lane {
@@ -121,6 +187,7 @@ impl Lane {
         match self {
             Self::Voice => "voice_capture",
             Self::Data => "bss",
+            Self::Asr => "asr",
         }
     }
 }
@@ -140,12 +207,19 @@ struct Pending {
     attribution: Option<Result<Attribution, Unresolved>>,
 }
 
+/// Runs the voice, BSS, recognition and event workers over the frames
+/// `input` pushes.
+///
+/// A worker panic, a BSS lane error or repeated recognizer panics are
+/// fatal: they are recorded as a `processing_failure`, `stop` is set so a
+/// live receiver ends, and after draining the error is returned.
 pub fn run<F>(
     output: &Output,
     source: Source,
     timing: Timing,
     transcribe: Option<F>,
     decoder: Option<bss::Decoder>,
+    stop: &AtomicBool,
     input: impl FnOnce(&mut Ingress) -> Result<()>,
 ) -> Result<()>
 where
@@ -164,7 +238,12 @@ where
         scope.spawn(move || {
             if has_voice {
                 let result = catch_unwind(AssertUnwindSafe(|| capture_voice(voice, &voice_events)));
-                let error = result.err().map(|_| "voice capture worker panicked".into());
+                let error = result.err().map(|payload| {
+                    format!(
+                        "voice capture worker panicked: {}",
+                        panic_message(&*payload)
+                    )
+                });
                 let _ = voice_events.send(Event::Done(Lane::Voice, error));
             }
         });
@@ -174,7 +253,12 @@ where
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     decode_data(decoder, data, &data_events, output)
                 }))
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("BSS decoder worker panicked")));
+                .unwrap_or_else(|payload| {
+                    Err(anyhow!(
+                        "BSS decoder worker panicked: {}",
+                        panic_message(&*payload)
+                    ))
+                });
                 let _ = data_events.send(Event::Done(
                     Lane::Data,
                     result.err().map(|err| format!("{err:#}")),
@@ -182,64 +266,104 @@ where
             }
         });
         scope.spawn(move || {
-            if let Some(mut transcribe) = transcribe {
-                let mut failed = false;
-                for Job { id, clip } in work {
-                    let result = if failed {
-                        Err(anyhow::anyhow!(
-                            "recognition worker is unavailable after a panic"
-                        ))
-                    } else {
-                        catch_unwind(AssertUnwindSafe(|| transcribe(&clip))).unwrap_or_else(|_| {
-                            failed = true;
-                            Err(anyhow::anyhow!("recognition worker panicked"))
-                        })
-                    };
-                    if send_events
-                        .send(Event::Inferred {
-                            id,
-                            result: Box::new(result),
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
+            if let Some(transcribe) = transcribe {
+                recognize(transcribe, work, &send_events);
             }
         });
         let control = scope.spawn(move || {
-            let mut coordinator =
-                Coordinator::new(output, source, window, gap, has_voice, has_data);
-            for event in events {
-                coordinator.event(event);
-                coordinator.dispatch(&jobs);
-                coordinator.settle();
-                if coordinator.drained() {
-                    break;
+            supervised(stop, || {
+                let mut coordinator =
+                    Coordinator::new(output, source, window, gap, has_voice, has_data, stop);
+                for event in events {
+                    coordinator.event(event);
+                    coordinator.dispatch(&jobs);
+                    coordinator.settle();
+                    if coordinator.drained() {
+                        break;
+                    }
                 }
-            }
+                coordinator.fatal
+            })
         });
-        let mut ingress = Ingress {
-            next: 0,
-            live: matches!(source, Source::Live),
-            voice: has_voice.then_some(send_voice),
-            data: has_data.then_some(send_data),
-            dropped_voice: 0,
-            dropped_data: 0,
-        };
+        let mut ingress = Ingress::new(
+            matches!(source, Source::Live),
+            has_voice.then_some(send_voice),
+            has_data.then_some(send_data),
+        );
         let result = input(&mut ingress);
-        if ingress.dropped_voice != 0 || ingress.dropped_data != 0 {
-            log(format_args!(
-                "Dropped audio blocks, voice {}, BSS {}",
-                ingress.dropped_voice, ingress.dropped_data
-            ));
+        if ingress.dropped != Drops::default() {
+            ingress.log_drops();
         }
         drop(ingress);
-        control
+        let fatal = control
             .join()
-            .map_err(|_| anyhow::anyhow!("gateway event worker panicked"))?;
+            .map_err(|_| anyhow!("gateway event worker panicked"))?;
+        if let Some(fatal) = fatal {
+            if let Err(error) = &result {
+                log(format_args!("Input also failed: {error:#}"));
+            }
+            anyhow::bail!("processing stopped: {fatal}");
+        }
         result
     })
+}
+
+/// Runs the event worker, setting `stop` as soon as it panics so a live
+/// receiver does not run on without it. Returns the fatal error, if any.
+fn supervised(stop: &AtomicBool, work: impl FnOnce() -> Option<String>) -> Option<String> {
+    catch_unwind(AssertUnwindSafe(work)).unwrap_or_else(|payload| {
+        let error = format!(
+            "gateway event worker panicked: {}",
+            panic_message(&*payload)
+        );
+        log(&error);
+        stop.store(true, Ordering::Relaxed);
+        Some(error)
+    })
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic")
+}
+
+/// Transcribes clips until the queue closes. Kodiak reloads its model after
+/// a panic, so a panic fails only its own clip; consecutive panics are fatal.
+fn recognize<F>(mut transcribe: F, work: Receiver<Job>, events: &SyncSender<Event>)
+where
+    F: FnMut(&Clip) -> Result<KodiakResult>,
+{
+    let mut panics = 0;
+    while let Ok(Job { id, clip }) = work.recv() {
+        let result = match catch_unwind(AssertUnwindSafe(|| transcribe(&clip))) {
+            Ok(result) => {
+                panics = 0;
+                result
+            }
+            Err(payload) => {
+                panics += 1;
+                Err(anyhow!(
+                    "recognition worker panicked: {}",
+                    panic_message(&*payload)
+                ))
+            }
+        };
+        let result = Box::new(result);
+        if events.send(Event::Inferred { id, result }).is_err() {
+            return;
+        }
+        if panics >= MAX_CONSECUTIVE_ASR_PANICS {
+            let error = format!("recognition panicked on {panics} consecutive clips");
+            // Close the queue first, so every clip dispatched after the
+            // coordinator sees this event fails at once.
+            drop(work);
+            let _ = events.send(Event::Done(Lane::Asr, Some(error)));
+            return;
+        }
+    }
 }
 
 fn capture_voice(frames: Receiver<VoiceFrame>, events: &SyncSender<Event>) {
@@ -307,11 +431,11 @@ fn decode_data(
         }
         next = index + 1;
         let packets = decoder.feed(&audio, at, output)?;
-        let masks = decoder.take_voice_masks();
         events.send(Event::DataProgress {
             through: next,
             packets,
-            masks,
+            masks: decoder.take_voice_masks(),
+            failures: decoder.take_failures(),
         })?;
     }
     decoder.finish()
@@ -333,6 +457,9 @@ struct Coordinator<'a> {
     waiting: VecDeque<(Clip, u64)>,
     pending: VecDeque<Pending>,
     recent_voice: VecDeque<(String, Range<u64>)>,
+    stop: &'a AtomicBool,
+    /// The first fatal failure, returned once the workers have drained.
+    fatal: Option<String>,
 }
 
 impl<'a> Coordinator<'a> {
@@ -343,6 +470,7 @@ impl<'a> Coordinator<'a> {
         gap: u64,
         voice: bool,
         data: bool,
+        stop: &'a AtomicBool,
     ) -> Self {
         Self {
             output,
@@ -360,6 +488,8 @@ impl<'a> Coordinator<'a> {
             waiting: VecDeque::new(),
             pending: VecDeque::new(),
             recent_voice: VecDeque::new(),
+            stop,
+            fatal: None,
         }
     }
 
@@ -393,9 +523,13 @@ impl<'a> Coordinator<'a> {
                 through,
                 packets,
                 mut masks,
+                failures,
             } => {
                 self.data_through = through;
                 self.masks.append(&mut masks);
+                for detail in failures {
+                    self.failure(Lane::Data.name(), detail);
+                }
                 for packet in packets {
                     if !packet.duplicate
                         && let Some(sender) = &packet.sender
@@ -426,7 +560,7 @@ impl<'a> Coordinator<'a> {
                 self.history.gap(frames.clone());
                 match lane {
                     Lane::Data => self.data_gaps.push_back(frames),
-                    Lane::Voice => self.active_voice = None,
+                    Lane::Voice | Lane::Asr => self.active_voice = None,
                 }
             }
             Event::Done(lane, error) => {
@@ -436,9 +570,18 @@ impl<'a> Coordinator<'a> {
                         self.active_voice = None;
                     }
                     Lane::Data => self.data_done = true,
+                    Lane::Asr => {
+                        // The worker closed its queue: queued clips will not
+                        // be transcribed, and later ones are refused.
+                        for pending in &mut self.pending {
+                            pending
+                                .text
+                                .get_or_insert_with(|| Err(anyhow!("recognition worker stopped")));
+                        }
+                    }
                 }
                 if let Some(error) = error {
-                    self.failure(lane.name(), error);
+                    self.fatal(lane.name(), error);
                 }
             }
             Event::Inferred { id, result } => {
@@ -610,6 +753,15 @@ impl<'a> Coordinator<'a> {
                 detail,
             },
         );
+    }
+
+    /// Records a failure the gateway cannot run on with and stops the input.
+    fn fatal(&mut self, stage: &str, detail: String) {
+        if self.fatal.is_none() {
+            self.fatal = Some(format!("{stage}: {detail}"));
+            self.stop.store(true, Ordering::Relaxed);
+        }
+        self.failure(stage, detail);
     }
 
     fn drained(&self) -> bool {
@@ -797,6 +949,7 @@ mod tests {
             },
             Some(recognize),
             Some(bss::Decoder::new(IF_RATE, Source::Wav, false, None)?),
+            &AtomicBool::new(false),
             |ingress| {
                 for (index, frame) in signal.chunks_exact(IF_FRAME_LEN).enumerate() {
                     let open = (5..r4_end).contains(&index) || (132..r5_end).contains(&index);
@@ -832,5 +985,313 @@ mod tests {
             matches!(&transcripts[0].kind, Kind::Transcript { radio_id: Some(id), text, .. } if id == "R4" && text == "Test voice")
         );
         Ok(())
+    }
+
+    const TIMING: Timing = Timing {
+        window_ms: 1_000,
+        trailing_gap_ms: 300,
+    };
+
+    fn failures(records: &[GatewayEvent]) -> Vec<(&str, &str)> {
+        records
+            .iter()
+            .filter_map(|event| match &event.kind {
+                Kind::ProcessingFailure { stage, detail } => {
+                    Some((stage.as_str(), detail.as_str()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn chat(content: &str) -> KodiakResult {
+        KodiakResult::Chat {
+            content: content.into(),
+        }
+    }
+
+    fn at(start: DateTime<Utc>, index: usize) -> Result<DateTime<Utc>> {
+        Ok(start + TimeDelta::milliseconds(i64::try_from(index * FRAME_MS)?))
+    }
+
+    /// Pushes voice-band frames that are open during `bursts`.
+    fn push_voice(ingress: &mut Ingress, frames: usize, bursts: &[Range<usize>]) -> Result<()> {
+        let start = Utc::now();
+        for index in 0..frames {
+            let open = bursts.iter().any(|burst| burst.contains(&index));
+            let audio = [if open { 0.15 } else { 0.0 }; AUDIO_FRAME_LEN];
+            ingress.push(open, &audio, &[0.0; IF_FRAME_LEN], at(start, index)?);
+        }
+        Ok(())
+    }
+
+    fn wait_for(stop: &AtomicBool) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !stop.load(Ordering::Relaxed) {
+            anyhow::ensure!(Instant::now() < deadline, "the stop flag was not set");
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_skip_reaches_both_lanes_and_speech_is_not_attributed_across_it() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let output = Output::new(temporary.path().to_owned(), 435_995_000, false)?;
+        let mut signal = vec![0.0; IF_FRAME_LEN * 195];
+        let r4 = packet(*b"R4")?;
+        signal[43 * IF_FRAME_LEN..43 * IF_FRAME_LEN + r4.len()].copy_from_slice(&r4);
+        let r4_end = 43 + r4.len().div_ceil(IF_FRAME_LEN);
+        let start = Utc::now();
+        let stop = AtomicBool::new(false);
+        run(
+            &output,
+            Source::Wav,
+            TIMING,
+            Some(|clip: &Clip| {
+                assert!(clip.first_frame >= 35, "a clip spans the gap");
+                Ok(chat("Test voice"))
+            }),
+            Some(bss::Decoder::new(IF_RATE, Source::Wav, false, None)?),
+            &stop,
+            |ingress| {
+                for (index, frame) in signal.chunks_exact(IF_FRAME_LEN).enumerate() {
+                    // Ten blocks are lost upstream in the middle of the speech.
+                    if index == 25 {
+                        ingress.skip(10);
+                    }
+                    let open = (5..r4_end).contains(&index);
+                    let voice = [if open { 0.15 } else { 0.0 }; AUDIO_FRAME_LEN];
+                    let shifted = if index < 25 { index } else { index + 10 };
+                    ingress.push(open, &voice, frame, at(start, shifted)?);
+                }
+                Ok(())
+            },
+        )?;
+        let records = recorded(&output)?;
+        let failures = failures(&records);
+        for stage in ["voice_capture", "bss"] {
+            assert!(
+                failures.contains(&(stage, "dropped input blocks 25..35")),
+                "{failures:?}"
+            );
+        }
+        // The clip open at the gap is dropped with it. Speech after the gap
+        // is followed by the packet with no gap in between.
+        let transcripts: Vec<_> = records
+            .iter()
+            .filter_map(|event| match &event.kind {
+                Kind::Transcript {
+                    radio_id,
+                    started_at,
+                    ..
+                } => Some((*started_at, radio_id.as_deref())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(transcripts, [(at(start, 35)?, Some("R4"))]);
+        assert!(!stop.load(Ordering::Relaxed));
+        Ok(())
+    }
+
+    #[test]
+    fn a_fatal_bss_failure_stops_a_live_run() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let output = Output::new(temporary.path().to_owned(), 435_995_000, false)?;
+        let stop = AtomicBool::new(false);
+        let result = run(
+            &output,
+            Source::Live,
+            TIMING,
+            None::<fn(&Clip) -> Result<KodiakResult>>,
+            Some(bss::Decoder::new(IF_RATE, Source::Live, false, None)?),
+            &stop,
+            |ingress| {
+                let quiet = [0.0; AUDIO_FRAME_LEN];
+                ingress.push(false, &quiet, &[0.0; IF_FRAME_LEN], Utc::now());
+                // No sample offset exists for this block: the decoder fails.
+                ingress.skip(u64::MAX / 2);
+                ingress.push(false, &quiet, &[0.0; IF_FRAME_LEN], Utc::now());
+                // As the radio loop does, run until told to stop.
+                wait_for(&stop)
+            },
+        );
+        let error = format!("{:#}", result.expect_err("a fatal BSS failure"));
+        assert!(
+            error.contains("bss: BSS block index is out of range"),
+            "{error}"
+        );
+        assert!(stop.load(Ordering::Relaxed));
+        let records = recorded(&output)?;
+        assert!(
+            failures(&records)
+                .iter()
+                .any(|(stage, detail)| *stage == "bss" && detail.contains("out of range"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_bss_save_does_not_stop_decoding() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let directory = temporary.path().join("events");
+        let output = Output::new(directory.clone(), 435_995_000, false)?;
+        let (r4, r5) = (packet(*b"R4")?, packet(*b"R5")?);
+        let r4_end = 43 + r4.len().div_ceil(IF_FRAME_LEN);
+        // The decoder has finished a block once a full queue behind it is pushed.
+        let restored = r4_end + AUDIO_QUEUE + 10;
+        let r5_start = restored + 10;
+        let mut signal = vec![0.0; IF_FRAME_LEN * (r5_start + 100)];
+        signal[43 * IF_FRAME_LEN..43 * IF_FRAME_LEN + r4.len()].copy_from_slice(&r4);
+        let r5_at = r5_start * IF_FRAME_LEN;
+        signal[r5_at..r5_at + r5.len()].copy_from_slice(&r5);
+        fs::remove_dir(&directory)?;
+        let start = Utc::now();
+        let stop = AtomicBool::new(false);
+        run(
+            &output,
+            Source::Wav,
+            TIMING,
+            None::<fn(&Clip) -> Result<KodiakResult>>,
+            Some(bss::Decoder::new(IF_RATE, Source::Wav, false, None)?),
+            &stop,
+            |ingress| {
+                for (index, frame) in signal.chunks_exact(IF_FRAME_LEN).enumerate() {
+                    if index == restored {
+                        fs::create_dir(&directory)?;
+                    }
+                    let quiet = [0.0; AUDIO_FRAME_LEN];
+                    ingress.push(false, &quiet, frame, at(start, index)?);
+                }
+                Ok(())
+            },
+        )?;
+        assert!(!stop.load(Ordering::Relaxed));
+        let records = recorded(&output)?;
+        let positions: Vec<_> = records
+            .iter()
+            .filter_map(|event| match &event.kind {
+                Kind::Position { radio_id, .. } => Some(radio_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(positions, ["R5"]);
+        Ok(())
+    }
+
+    #[test]
+    fn recoverable_bss_failures_are_recorded_and_lane_errors_are_fatal() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let output = Output::new(temporary.path().to_owned(), 435_995_000, false)?;
+        let stop = AtomicBool::new(false);
+        let mut coordinator = Coordinator::new(&output, Source::Live, 50, 15, false, true, &stop);
+        coordinator.event(Event::DataProgress {
+            through: 1,
+            packets: Vec::new(),
+            masks: VecDeque::new(),
+            failures: vec!["BSS event could not be saved: disk full".into()],
+        });
+        assert!(!stop.load(Ordering::Relaxed));
+        assert!(coordinator.fatal.is_none());
+        coordinator.event(Event::Done(Lane::Data, Some("decoder failed".into())));
+        assert!(stop.load(Ordering::Relaxed));
+        assert_eq!(coordinator.fatal.as_deref(), Some("bss: decoder failed"));
+        let records = recorded(&output)?;
+        let mut failures = failures(&records);
+        failures.sort_unstable();
+        assert_eq!(
+            failures,
+            [
+                ("bss", "BSS event could not be saved: disk full"),
+                ("bss", "decoder failed")
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_recognizer_panic_fails_only_its_own_clip() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let output = Output::new(temporary.path().to_owned(), 435_995_000, false)?;
+        let stop = AtomicBool::new(false);
+        let mut calls = 0;
+        run(
+            &output,
+            Source::Wav,
+            TIMING,
+            Some(|_: &Clip| {
+                calls += 1;
+                assert!(calls > 1, "test transcriber panic");
+                Ok(chat("Second clip"))
+            }),
+            None,
+            &stop,
+            |ingress| push_voice(ingress, 150, &[5..30, 60..85]),
+        )?;
+        assert!(!stop.load(Ordering::Relaxed));
+        let records = recorded(&output)?;
+        let failures = failures(&records);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].0 == "asr" && failures[0].1.contains("test transcriber panic"));
+        let transcripts: Vec<_> = records
+            .iter()
+            .filter_map(|event| match &event.kind {
+                Kind::Transcript { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(transcripts, ["Second clip"]);
+        Ok(())
+    }
+
+    #[test]
+    fn consecutive_recognizer_panics_are_fatal() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let output = Output::new(temporary.path().to_owned(), 435_995_000, false)?;
+        let stop = AtomicBool::new(false);
+        let result = run(
+            &output,
+            Source::Wav,
+            TIMING,
+            Some(|_: &Clip| -> Result<KodiakResult> { panic!("test transcriber panic") }),
+            None,
+            &stop,
+            |ingress| push_voice(ingress, 230, &[5..30, 60..85, 115..140, 170..195]),
+        );
+        let error = format!("{:#}", result.expect_err("repeated panics are fatal"));
+        assert!(
+            error.contains("asr: recognition panicked on 3 consecutive clips"),
+            "{error}"
+        );
+        assert!(stop.load(Ordering::Relaxed));
+        // Every clip is accounted for: three panics and one refused clip.
+        let records = recorded(&output)?;
+        let failures = failures(&records);
+        assert_eq!(
+            failures
+                .iter()
+                .filter(|(_, detail)| detail.contains("test transcriber panic"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            failures.iter().filter(|(stage, _)| *stage == "asr").count(),
+            5,
+            "{failures:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_coordinator_panic_sets_the_stop_flag_without_waiting_for_input() -> Result<()> {
+        let stop = AtomicBool::new(false);
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| supervised(&stop, || panic!("coordinator test panic")));
+            // The input side only learns of the panic through the flag.
+            wait_for(&stop)?;
+            let fatal = worker.join().map_err(|_| anyhow!("the panic escaped"))?;
+            assert!(fatal.is_some_and(|error| error.contains("coordinator test panic")));
+            Ok(())
+        })
     }
 }

@@ -132,9 +132,15 @@ impl AudioHistory {
         self.packets.push_back(packet);
     }
 
+    /// Records lost blocks. A loss before both lanes is reported by each
+    /// with the same range; it is merged rather than stored twice.
     pub fn gap(&mut self, gap: Range<u64>) {
-        if let Some(last) = self.gaps.back_mut().filter(|last| last.end == gap.start) {
-            last.end = gap.end;
+        if let Some(last) = self
+            .gaps
+            .back_mut()
+            .filter(|last| last.start <= gap.start && last.end >= gap.start)
+        {
+            last.end = last.end.max(gap.end);
         } else {
             self.gaps.push_back(gap);
         }

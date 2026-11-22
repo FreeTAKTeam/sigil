@@ -34,11 +34,10 @@ mod questions;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Mutex;
 
 use kodiak_core::{
     Addressed, Category, Classification, Intent, IntentClassifier, MecpReport, RchCommand,
-    RejectReason, Rejection,
+    RejectReason, Rejection, WakeWord,
 };
 use kodiak_intent::vocabulary::{MECP_V1, Mecp, RCH_V1, Rch};
 use kodiak_intent::{DeterministicClassifier, first_word_wake};
@@ -246,8 +245,6 @@ pub struct LayaClassifier<O: Oracle = LayaOracle> {
     baseline: DeterministicClassifier,
     /// Every word the MECP and hub vocabularies know.
     known: BTreeSet<String>,
-    /// The classification of the command last judged by `addressed`.
-    cache: Mutex<Option<(String, Classification)>>,
 }
 
 impl LayaClassifier<LayaOracle> {
@@ -294,7 +291,6 @@ impl<O: Oracle> LayaClassifier<O> {
             rch,
             baseline: DeterministicClassifier::new(),
             known,
-            cache: Mutex::new(None),
         }
     }
 
@@ -588,31 +584,23 @@ impl<O: Oracle> IntentClassifier for LayaClassifier<O> {
     }
 
     fn classify(&self, command: &str) -> Classification {
-        if let Ok(mut cache) = self.cache.lock()
-            && let Some((cached, classification)) = cache.take()
-            && cached == command
-        {
-            return classification;
-        }
         self.decide(command)
     }
 
     /// Steps 1 and 2. The engine has already looked for the exact activation
     /// word anywhere in the transcript; this accepts a misheard one as the
     /// first word, but only when the rest is a recognized command, so
-    /// ordinary conversation stays chat.
-    fn addressed(&self, transcript: &str) -> Option<Addressed> {
-        let (heard, command) = first_word_wake(transcript)?;
+    /// ordinary conversation stays chat. The engine reuses the
+    /// classification made here.
+    fn addressed(&self, transcript: &str, wake: &WakeWord) -> Option<Addressed> {
+        let (heard, command) = first_word_wake(transcript, wake)?;
+        let command = wake.strip_leading(&command).to_owned();
         let classification = self.decide(&command);
-        if classification.result.is_err() {
-            return None;
-        }
-        if let Ok(mut cache) = self.cache.lock() {
-            *cache = Some((command.clone(), classification));
-        }
+        classification.result.as_ref().ok()?;
         Some(Addressed {
             command,
             heard: Some(heard),
+            classification: Some(classification),
         })
     }
 }

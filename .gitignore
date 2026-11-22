@@ -6,3 +6,12 @@
 /gateway.toml
 /.lxmf-outbox.sqlite3*
 __pycache__/
+# Identity files and registries, wherever they are imported from or kept.
+*.identity
+radios.sqlite3*
+# Captures and output folders that the README examples write into the project root.
+/*.wav
+/wav-check/
+/bss-check/
+/bss-replay/
+/gateway-replay/

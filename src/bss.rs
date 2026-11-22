@@ -22,6 +22,9 @@ const FLAG: u8 = 0x7e;
 const MAX_FRAME_BITS: usize = 4_096;
 const DEDUP_SECONDS: u64 = 10;
 const MASK_GUARD_FRAMES: u64 = 3;
+/// `--bss-capture` stops here: 4 GB of f32 samples, under the 4 GiB RIFF
+/// limit. About 8 h 40 min at 32 kHz.
+const CAPTURE_LIMIT_SAMPLES: u32 = 1_000_000_000;
 
 #[derive(Debug, Default, PartialEq, Serialize)]
 struct Packet {
@@ -317,6 +320,13 @@ pub struct Decoder {
     voice_masks: VecDeque<Range<u64>>,
     recording: Option<WavWriter<BufWriter<File>>>,
     antenna: Option<(f64, f64)>,
+    /// Errors decoding continued after, for the caller to report.
+    failures: Vec<String>,
+    /// Whether the last event or diagnostic save failed. A failure is
+    /// reported once until saving works again, so a full disk does not
+    /// raise one failure per packet.
+    saving_failed: bool,
+    diagnostics_failed: bool,
 }
 
 /// Great-circle distance in metres between two positions in degrees.
@@ -366,6 +376,9 @@ impl Decoder {
             voice_masks: VecDeque::new(),
             recording,
             antenna: None,
+            failures: Vec::new(),
+            saving_failed: false,
+            diagnostics_failed: false,
         })
     }
 
@@ -384,12 +397,15 @@ impl Decoder {
         AfskDemodulator::new(settings).map_err(|e| anyhow::anyhow!("AFSK demodulator: {e:?}"))
     }
 
+    /// Restarts demodulation at block `index` after a gap. The capture WAV
+    /// is padded with silence so its timing still matches the blocks.
     pub fn skip_to_frame(&mut self, index: u64) -> Result<()> {
-        let sample = index * (u64::from(self.sample_rate) * FRAME_MS as u64 / 1_000);
-        if let Some(recording) = &mut self.recording {
-            for _ in self.sample..sample {
-                recording.write_sample(0.0_f32)?;
-            }
+        let sample = index
+            .checked_mul(u64::from(self.sample_rate) * FRAME_MS as u64 / 1_000)
+            .context("BSS block index is out of range")?;
+        while self.recording.is_some() && self.sample < sample {
+            self.record(0.0);
+            self.sample += 1;
         }
         self.sample = sample;
         self.demod = Self::demodulator(self.sample_rate)?;
@@ -402,6 +418,65 @@ impl Decoder {
         std::mem::take(&mut self.voice_masks)
     }
 
+    /// Errors decoding continued after since the last call: a failed event,
+    /// diagnostic or capture write.
+    pub fn take_failures(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.failures)
+    }
+
+    fn record(&mut self, value: f32) {
+        let Some(recording) = &mut self.recording else {
+            return;
+        };
+        if recording.len() >= CAPTURE_LIMIT_SAMPLES {
+            let result = self.recording.take().map(WavWriter::finalize);
+            crate::output::log(format_args!(
+                "Discriminator capture reached {CAPTURE_LIMIT_SAMPLES} samples and was closed"
+            ));
+            if let Some(Err(error)) = result {
+                self.failures.push(format!(
+                    "discriminator capture could not be finalized: {error}"
+                ));
+            }
+        } else if let Err(error) = recording.write_sample(value) {
+            // Stop at the first error rather than failing on every block.
+            let finalized = match self.recording.take().map(WavWriter::finalize) {
+                Some(Err(error)) => format!("; finalizing also failed: {error}"),
+                _ => String::new(),
+            };
+            self.failures.push(format!(
+                "discriminator capture stopped after a write error: {error}{finalized}"
+            ));
+        }
+    }
+
+    /// Reports a save failure once per run of failures; repeats are only
+    /// logged. Returns the saved value.
+    fn saved<T>(
+        result: Result<T>,
+        failing: &mut bool,
+        failures: &mut Vec<String>,
+        what: &str,
+    ) -> Option<T> {
+        match result {
+            Ok(value) => {
+                if std::mem::take(failing) {
+                    crate::output::log(format_args!("{what}: saving works again"));
+                }
+                Some(value)
+            }
+            Err(error) => {
+                let detail = format!("{what} could not be saved: {error:#}");
+                if std::mem::replace(failing, true) {
+                    crate::output::log(&detail);
+                } else {
+                    failures.push(detail);
+                }
+                None
+            }
+        }
+    }
+
     pub fn feed(
         &mut self,
         audio: &[f32],
@@ -411,9 +486,7 @@ impl Decoder {
         let flag_samples = (8 * u64::from(self.sample_rate)).div_ceil(BIT_RATE);
         let mut decoded = Vec::new();
         for &value in audio {
-            if let Some(recording) = &mut self.recording {
-                recording.write_sample(value)?;
-            }
+            self.record(value);
             self.sample += 1;
             let Some(level) = self.demod.push_sample_f32(value) else {
                 continue;
@@ -455,20 +528,22 @@ impl Decoder {
         }
         match result {
             Ok(payload) if payload.first() == Some(&BSS_MARKER) => match parse(&payload) {
-                Ok(packet) => self
-                    .emit(&packet, payload, &frame.samples, at, output)
-                    .map(Some),
-                Err(error) => self
-                    .diagnostic(frame, at, output, error.to_string())
-                    .map(|()| None),
+                Ok(packet) => self.emit(&packet, payload, &frame.samples, at, output),
+                Err(error) => {
+                    self.diagnostic(frame, at, output, error.to_string());
+                    Ok(None)
+                }
             },
             Ok(_) => Ok(None),
-            Err(error) => self
-                .diagnostic(frame, at, output, error.to_string())
-                .map(|()| None),
+            Err(error) => {
+                self.diagnostic(frame, at, output, error.to_string());
+                Ok(None)
+            }
         }
     }
 
+    /// The decoded packet, or `None` when its event could not be saved: a
+    /// packet without an event cannot be referenced by gateway events.
     fn emit(
         &mut self,
         packet: &Packet,
@@ -476,7 +551,7 @@ impl Decoder {
         samples: &Range<u64>,
         at: DateTime<Utc>,
         output: &Output,
-    ) -> Result<Decoded> {
+    ) -> Result<Option<Decoded>> {
         let window = u64::from(self.sample_rate) * DEDUP_SECONDS;
         self.recent
             .retain(|(sample, _, _)| self.sample - sample <= window);
@@ -495,7 +570,7 @@ impl Decoder {
         {
             decoded.id.clone_from(id);
             decoded.duplicate = true;
-            return Ok(decoded);
+            return Ok(Some(decoded));
         }
         let event = Event {
             schema: "sdr.bss.v1",
@@ -508,7 +583,18 @@ impl Decoder {
             payload_hex: hex::encode_upper(&payload),
             packet,
         };
-        let path = output.save_event(at, "bss", &event)?;
+        // Not added to the recent packets: a repetition is saved instead.
+        let Some(path) = Self::saved(
+            output.save_event(at, "bss", &event),
+            &mut self.saving_failed,
+            &mut self.failures,
+            &format!(
+                "BSS event from {:?}",
+                packet.sender.as_deref().unwrap_or("(absent)")
+            ),
+        ) else {
+            return Ok(None);
+        };
         decoded.id = path
             .file_stem()
             .context("BSS event filename")?
@@ -526,7 +612,7 @@ impl Decoder {
         ));
         self.recent
             .push_back((self.sample, payload, decoded.id.clone()));
-        Ok(decoded)
+        Ok(Some(decoded))
     }
 
     fn distance_from_antenna(&self, position: Option<Position>) -> Option<u32> {
@@ -537,13 +623,7 @@ impl Decoder {
         Some(metres as u32)
     }
 
-    fn diagnostic(
-        &self,
-        frame: &Frame,
-        at: DateTime<Utc>,
-        output: &Output,
-        error: String,
-    ) -> Result<()> {
+    fn diagnostic(&mut self, frame: &Frame, at: DateTime<Utc>, output: &Output, error: String) {
         if self.diagnostics {
             let event = Diagnostic {
                 schema: "sdr.bss.diagnostic.v1",
@@ -555,9 +635,13 @@ impl Decoder {
                 error,
                 hdlc_bits: frame.bits.iter().map(|&b| char::from(b'0' + b)).collect(),
             };
-            output.save_event(at, "bss-diagnostic", &event)?;
+            Self::saved(
+                output.save_event(at, "bss-diagnostic", &event),
+                &mut self.diagnostics_failed,
+                &mut self.failures,
+                "BSS diagnostic",
+            );
         }
-        Ok(())
     }
 
     fn frame_index(&self, sample: u64) -> u64 {
@@ -684,6 +768,50 @@ mod tests {
             Some("112233445566778899AABBCC")
         );
         assert!(parse(&hex::decode("018B000188DE042041")?).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_save_is_reported_once_and_decoding_continues() -> Result<()> {
+        let rate = crate::audio::SAMPLE_RATE;
+        let temporary = tempdir()?;
+        let directory = temporary.path().join("events");
+        let output = Output::new(directory.clone(), 435_995_000, false)?;
+        let config = ModulatorConfig::bell_202(SampleRate::new(rate).expect("valid sample rate"))
+            .expect("valid modem config");
+        let burst = |payload: &[u8]| -> Vec<f32> {
+            let mut samples: Vec<f32> = Modulator::new(config)
+                .f32_samples(NrziEncoder::new(Bit::One).encode_iter(frame_bits(payload, 32, 3)))
+                .map(|sample| sample * 0.5)
+                .collect();
+            samples.extend([0.0; 3_200]);
+            samples
+        };
+        let mut bss = Decoder::new(rate, Source::Wav, false, None)?;
+        let feed = |decoder: &mut Decoder, payload: &[u8]| -> Result<Vec<Decoded>> {
+            let mut packets = Vec::new();
+            for chunk in burst(payload).chunks(320) {
+                packets.extend(decoder.feed(chunk, Utc::now(), &output)?);
+            }
+            Ok(packets)
+        };
+        let example = hex::decode(EXAMPLE)?;
+        let short = [1, 2, 0x20, b'A'];
+        std::fs::remove_dir(&directory)?;
+        assert!(feed(&mut bss, &example)?.is_empty());
+        let failures = bss.take_failures();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].starts_with("BSS event from \"KK7VZT\" could not be saved"));
+        // The disk is still failing: logged, but not reported again.
+        assert!(feed(&mut bss, &short)?.is_empty());
+        assert!(bss.take_failures().is_empty());
+        std::fs::create_dir(&directory)?;
+        // An unsaved packet is not a duplicate: its repetition is saved.
+        let saved = feed(&mut bss, &example)?;
+        assert_eq!(saved.len(), 1);
+        assert!(!saved[0].duplicate);
+        assert!(bss.take_failures().is_empty());
+        assert_eq!(directory.read_dir()?.count(), 1);
         Ok(())
     }
 

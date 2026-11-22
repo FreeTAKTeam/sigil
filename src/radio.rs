@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use clap::Args;
 use librtlsdr_rs::{RtlSdrDevice, RtlSdrReader};
 use sdr_dsp::correction::DcBlocker;
@@ -211,8 +211,81 @@ pub enum Event<'a> {
         open: bool,
         audio: &'a [f32; AUDIO_FRAME_LEN],
         discriminator_audio: &'a [f32],
+        /// When the block's last sample arrived over USB.
         at: DateTime<Utc>,
     },
+    /// I/Q was dropped before the next frame: this many 20 ms blocks,
+    /// rounded up, including a discarded partial block.
+    Lost {
+        frames: u64,
+    },
+}
+
+/// One USB transfer, the bytes dropped since the previous delivered
+/// transfer, and when `read_sync` returned it.
+struct Transfer {
+    buffer: Vec<u8>,
+    count: usize,
+    lost: u64,
+    read_at: DateTime<Utc>,
+}
+
+/// Cuts the I/Q byte stream into 20 ms blocks across transfer boundaries.
+struct Blocks {
+    frame: Vec<u8>,
+    filled: usize,
+    /// Stream position in bytes, dropped bytes included: blocks start on
+    /// an even offset, the I byte of a pair.
+    offset: u64,
+}
+
+impl Blocks {
+    fn new() -> Self {
+        Self {
+            frame: vec![0; USB_FRAME_BYTES],
+            filled: 0,
+            offset: 0,
+        }
+    }
+
+    /// Accounts for `lost` bytes dropped before `input` and returns the
+    /// blocks they cost. The partial block straddles the gap, so it is
+    /// discarded; after an odd loss the leading Q byte is skipped.
+    fn resume(&mut self, input: &mut &[u8], lost: u64) -> u64 {
+        if lost == 0 {
+            return 0;
+        }
+        let mut missing = lost + self.filled as u64;
+        self.filled = 0;
+        self.offset = self.offset.wrapping_add(lost);
+        if self.offset % 2 == 1 {
+            *input = input.get(1..).unwrap_or_default();
+            self.offset = self.offset.wrapping_add(1);
+            missing += 1;
+        }
+        missing.div_ceil(USB_FRAME_BYTES as u64)
+    }
+
+    /// Consumes `input` until a block is complete and returns it.
+    fn fill(&mut self, input: &mut &[u8]) -> Option<&[u8]> {
+        let take = (USB_FRAME_BYTES - self.filled).min(input.len());
+        self.frame[self.filled..self.filled + take].copy_from_slice(&input[..take]);
+        *input = &input[take..];
+        self.filled += take;
+        self.offset = self.offset.wrapping_add(take as u64);
+        if self.filled < USB_FRAME_BYTES {
+            return None;
+        }
+        self.filled = 0;
+        Some(&self.frame)
+    }
+}
+
+/// How long `bytes` of I/Q take to arrive.
+fn usb_duration(bytes: usize) -> TimeDelta {
+    TimeDelta::microseconds(
+        i64::try_from(bytes as u64 * 1_000_000 / (2 * u64::from(USB_RATE))).unwrap_or(0),
+    )
 }
 
 /// Receives I/Q until `stopped`, calling `on_event` for every 20 ms block.
@@ -231,7 +304,7 @@ pub fn receive(
     on_event: impl FnMut(Event<'_>) -> Result<()>,
 ) -> Result<()> {
     let reader = device.reader();
-    let (filled_tx, filled_rx) = sync_channel::<(Vec<u8>, usize)>(USB_QUEUE);
+    let (filled_tx, filled_rx) = sync_channel::<Transfer>(USB_QUEUE);
     let (spare_tx, spare_rx) = sync_channel::<Vec<u8>>(USB_QUEUE + 2);
     thread::scope(|scope| {
         let usb = scope.spawn(move || read_usb(&reader, &filled_tx, &spare_rx, stopped));
@@ -256,27 +329,38 @@ pub fn receive(
 
 fn read_usb(
     reader: &RtlSdrReader,
-    filled: &SyncSender<(Vec<u8>, usize)>,
+    filled: &SyncSender<Transfer>,
     spare: &Receiver<Vec<u8>>,
     stopped: &AtomicBool,
 ) -> Result<()> {
+    let mut lost = 0;
+    let mut reuse = None;
     while !stopped.load(Ordering::Relaxed) {
-        let mut buffer = spare
-            .try_recv()
-            .unwrap_or_else(|_| vec![0; USB_TRANSFER_BYTES]);
+        let mut buffer = reuse
+            .take()
+            .or_else(|| spare.try_recv().ok())
+            .unwrap_or_else(|| vec![0; USB_TRANSFER_BYTES]);
         let count = reader
             .read_sync(&mut buffer)
             .context("read I/Q from RTL-SDR")?;
+        let read_at = Utc::now();
         ensure!(count > 0, "RTL-SDR ended its I/Q stream");
-        match filled.try_send((buffer, count)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
+        match filled.try_send(Transfer {
+            buffer,
+            count,
+            lost,
+            read_at,
+        }) {
+            Ok(()) => lost = 0,
+            Err(TrySendError::Full(transfer)) => {
                 // The DSP is over USB_QUEUE transfers behind: keep the
-                // dongle drained and report the gap instead of stalling.
+                // dongle drained and report the gap with the next transfer.
+                lost += count as u64;
                 let lost_ms = count as u64 * 1_000 / (2 * u64::from(USB_RATE));
                 log(format_args!(
                     "Signal processing fell behind; dropped {lost_ms} ms of I/Q"
                 ));
+                reuse = Some(transfer.buffer);
             }
             Err(TrySendError::Disconnected(_)) => break,
         }
@@ -289,12 +373,11 @@ fn process(
     calibrate_squelch: bool,
     monitor_power: bool,
     stopped: &AtomicBool,
-    filled: &Receiver<(Vec<u8>, usize)>,
+    filled: &Receiver<Transfer>,
     spare: &SyncSender<Vec<u8>>,
     mut on_event: impl FnMut(Event<'_>) -> Result<()>,
 ) -> Result<()> {
-    let mut frame = vec![0_u8; USB_FRAME_BYTES];
-    let mut filled_bytes = 0;
+    let mut assembler = Blocks::new();
     let mut blocks = 0_usize;
     let blocks_per_second = 1_000 / FRAME_MS;
     let warmup_blocks = if calibrate_squelch {
@@ -307,24 +390,28 @@ fn process(
     let mut open_in_interval = false;
 
     while !stopped.load(Ordering::Relaxed) {
-        let (buffer, count) = match filled.recv_timeout(Duration::from_millis(250)) {
+        let Transfer {
+            buffer,
+            count,
+            lost,
+            read_at,
+        } = match filled.recv_timeout(Duration::from_millis(250)) {
             Ok(transfer) => transfer,
             Err(RecvTimeoutError::Timeout) => continue,
             // The reader stopped: it was told to, or its error is joined above.
             Err(RecvTimeoutError::Disconnected) => break,
         };
         let mut input = &buffer[..count];
+        // DSP state is kept across a loss: filters ring out within a block,
+        // and the DC estimate and squelch level stay valid. Frames are only
+        // numbered once the receiver is ready.
+        let missing = assembler.resume(&mut input, lost);
+        if missing > 0 && blocks >= warmup_blocks {
+            on_event(Event::Lost { frames: missing })?;
+        }
         // Transfers need not align with blocks. Preserve I/Q byte pairing.
-        while !input.is_empty() {
-            let take = (USB_FRAME_BYTES - filled_bytes).min(input.len());
-            frame[filled_bytes..filled_bytes + take].copy_from_slice(&input[..take]);
-            input = &input[take..];
-            filled_bytes += take;
-            if filled_bytes < USB_FRAME_BYTES {
-                continue;
-            }
-            filled_bytes = 0;
-            nfm.process(&frame)?;
+        while let Some(frame) = assembler.fill(&mut input) {
+            nfm.process(frame)?;
             blocks += 1;
             if blocks <= warmup_blocks {
                 if calibrate_squelch && blocks > RECEIVER_SETTLE_FRAMES {
@@ -349,7 +436,7 @@ fn process(
                 open,
                 audio: &nfm.voice.audio,
                 discriminator_audio: &nfm.discriminator_audio,
-                at: Utc::now(),
+                at: read_at - usb_duration(input.len()),
             })?;
 
             if monitor_power {
@@ -377,6 +464,105 @@ mod tests {
     use std::f64::consts::TAU;
 
     use super::*;
+
+    /// Bytes holding their stream position's parity: 0 for I, 1 for Q.
+    fn stream(start: u64, len: usize) -> Vec<u8> {
+        (start..start + len as u64)
+            .map(|offset| u8::from(offset % 2 == 1))
+            .collect()
+    }
+
+    #[test]
+    fn a_usb_loss_discards_the_partial_block_and_keeps_iq_pairing() {
+        let block = USB_FRAME_BYTES;
+        let mut blocks = Blocks::new();
+        let first = stream(0, block + block / 2);
+        let mut input = first.as_slice();
+        assert_eq!(blocks.resume(&mut input, 0), 0);
+        assert!(blocks.fill(&mut input).is_some());
+        assert!(
+            blocks.fill(&mut input).is_none(),
+            "half a block is buffered"
+        );
+        // Two blocks and one byte are lost, so the next transfer starts on a
+        // Q byte: the half block, the loss and the skipped byte cost three.
+        let lost = 2 * block as u64 + 1;
+        let second = stream((block + block / 2) as u64 + lost, 2 * block + 2);
+        let mut input = second.as_slice();
+        assert_eq!(blocks.resume(&mut input, lost), 3);
+        let mut delivered = 0;
+        while let Some(frame) = blocks.fill(&mut input) {
+            assert!(frame.chunks_exact(2).all(|pair| pair == [0, 1]));
+            delivered += 1;
+        }
+        assert_eq!(delivered, 2);
+        assert_eq!(blocks.filled, 1);
+        // An even loss on a block boundary costs exactly its blocks.
+        let mut aligned = Blocks::new();
+        let third = stream(block as u64, block);
+        let mut input = third.as_slice();
+        assert_eq!(aligned.resume(&mut input, block as u64), 1);
+        assert!(aligned.fill(&mut input).is_some());
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Seen {
+        Ready,
+        Frame(DateTime<Utc>),
+        Lost(u64),
+    }
+
+    #[test]
+    fn losses_after_warmup_are_reported_and_frames_carry_the_read_time() -> Result<()> {
+        let block = USB_FRAME_BYTES;
+        let (send, filled) = sync_channel(4);
+        let (spare, _spares) = sync_channel(4);
+        let first_read = Utc::now();
+        let second_read = first_read + TimeDelta::milliseconds(200);
+        let third_read = second_read + TimeDelta::milliseconds(200);
+        let quiet = vec![128; 5 * block];
+        let transfer = |count, lost, read_at| Transfer {
+            buffer: quiet.clone(),
+            count,
+            lost,
+            read_at,
+        };
+        // A loss during the five warm-up blocks is not numbered or reported.
+        send.send(transfer(2 * block + block / 2, 0, first_read))?;
+        send.send(transfer(4 * block + block / 2, block as u64, second_read))?;
+        send.send(transfer(2 * block + 2, 2 * block as u64 + 1, third_read))?;
+        drop(send);
+        let mut seen = Vec::new();
+        process(
+            Nfm::new(Some(-32.0))?,
+            false,
+            false,
+            &AtomicBool::new(false),
+            &filled,
+            &spare,
+            |event| {
+                seen.push(match event {
+                    Event::Ready => Seen::Ready,
+                    Event::Frame { at, .. } => Seen::Frame(at),
+                    Event::Lost { frames } => Seen::Lost(frames),
+                });
+                Ok(())
+            },
+        )?;
+        assert_eq!(
+            seen,
+            [
+                Seen::Ready,
+                // Half a block of the transfer arrived after this block.
+                Seen::Frame(second_read - TimeDelta::milliseconds(10)),
+                Seen::Lost(3),
+                // One block and one byte (0.49 µs) followed it.
+                Seen::Frame(third_read - TimeDelta::microseconds(20_000)),
+                Seen::Frame(third_read),
+            ]
+        );
+        Ok(())
+    }
 
     #[test]
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

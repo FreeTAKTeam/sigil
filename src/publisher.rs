@@ -1,9 +1,10 @@
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,7 @@ use lxmf_runtime::{
     InProcessBackendConfig, LocalPropagation, PropagationRouteLimits,
 };
 use lxmf_sdk::SendRequest;
+use rand_core::{OsRng, RngCore};
 use rns_transport::destination::{DestinationName, SingleInputDestination};
 use rns_transport::hash::AddressHash;
 use rns_transport::iface::tcp_client::TcpClient;
@@ -39,6 +41,20 @@ const DELIVERY_TTL: i64 = 7 * 24 * 60 * 60;
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(90);
 const JOBS_PER_PASS: usize = 32;
+const MAX_BACKOFF: i64 = 300;
+const RECEIPT_CAPACITY: usize = 256;
+/// Backlog summaries and receipt-eviction warnings are rate-limited to this.
+const SUMMARY_INTERVAL: Duration = Duration::from_mins(1);
+const LINK_CONNECT_SECS: u64 = 4;
+const RESOURCE_TRANSFER_SECS: u64 = 10;
+const PATH_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const PREPARE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Above `recover_direct`'s own bound: a path wait of the link timeout, then
+/// link activation and transfer within link + resource timeouts.
+const RECOVER_TIMEOUT: Duration =
+    Duration::from_secs(2 * LINK_CONNECT_SECS + RESOURCE_TRANSFER_SECS + 2);
+const DESTINATION_TIMEOUT: Duration = Duration::from_secs(10);
+const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Sender {
     destination: Arc<Mutex<SingleInputDestination>>,
@@ -56,34 +72,72 @@ pub struct Publisher<'a> {
     target: AddressHash,
     senders: HashMap<String, Sender>,
     receipts: ReceiptInbox,
-    active_after: DateTime<Utc>,
-    journal: PathBuf,
+    queue: Queue,
+    backlog: Option<(Backlog, Instant)>,
     _journal_lock: File,
 }
 
+/// Proofs reported by the transport. The transport calls `on_receipt` from
+/// its packet-drain task; every critical section here is a short scan of at
+/// most `RECEIPT_CAPACITY` hashes and never spans an await.
 #[derive(Clone, Default)]
-struct ReceiptInbox(Arc<std::sync::Mutex<VecDeque<String>>>);
+struct ReceiptInbox(Arc<std::sync::Mutex<Receipts>>);
+
+#[derive(Default)]
+struct Receipts {
+    hashes: VecDeque<String>,
+    evicted: u64,
+    reported: Option<Instant>,
+}
 
 impl ReceiptHandler for ReceiptInbox {
     fn on_receipt(&self, receipt: &DeliveryReceipt) {
-        if let Ok(mut inbox) = self.0.try_lock() {
-            if inbox.len() >= 256 {
-                inbox.pop_front();
-            }
-            inbox.push_back(hex::encode(receipt.packet_hash().as_slice()));
-        }
+        self.push(hex::encode(receipt.packet_hash().as_slice()));
     }
 }
 
 impl ReceiptInbox {
+    fn lock(&self) -> MutexGuard<'_, Receipts> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn push(&self, hash: String) {
+        let evicted = {
+            let mut inbox = self.lock();
+            let mut evicted = None;
+            if inbox.hashes.len() >= RECEIPT_CAPACITY {
+                inbox.hashes.pop_front();
+                inbox.evicted += 1;
+                if inbox
+                    .reported
+                    .is_none_or(|last| last.elapsed() >= SUMMARY_INTERVAL)
+                {
+                    inbox.reported = Some(Instant::now());
+                    evicted = Some(std::mem::take(&mut inbox.evicted));
+                }
+            }
+            inbox.hashes.push_back(hash);
+            evicted
+        };
+        if let Some(count) = evicted {
+            log(format_args!(
+                "Fabric receipt inbox full: dropped {count} unclaimed proof(s)"
+            ));
+        }
+    }
+
+    fn contains(&self, expected: &str) -> bool {
+        self.lock().hashes.iter().any(|receipt| receipt == expected)
+    }
+
     fn take(&self, expected: &str) -> bool {
-        self.0.lock().ok().is_some_and(|mut inbox| {
-            inbox
-                .iter()
-                .position(|receipt| receipt == expected)
-                .and_then(|index| inbox.remove(index))
-                .is_some()
-        })
+        let mut inbox = self.lock();
+        inbox
+            .hashes
+            .iter()
+            .position(|receipt| receipt == expected)
+            .and_then(|index| inbox.hashes.remove(index))
+            .is_some()
     }
 }
 
@@ -118,6 +172,336 @@ enum Status {
 impl Status {
     fn pending(&self) -> bool {
         matches!(self, Self::Queued | Self::AwaitingProof)
+    }
+}
+
+/// Retry delay after `attempts` tries: `3 * 2^min(n,7)` seconds, +/-20% from
+/// `entropy`, never above `MAX_BACKOFF`.
+fn backoff(attempts: u32, entropy: u32) -> i64 {
+    let base = (3 * 2_i64.pow(attempts.min(7))).min(MAX_BACKOFF);
+    let spread = base / 5;
+    (base - spread + i64::from(entropy) % (2 * spread + 1)).min(MAX_BACKOFF)
+}
+
+fn bounded<F: Future>(
+    runtime: &Runtime,
+    limit: Duration,
+    what: &str,
+    future: F,
+) -> Result<F::Output> {
+    // The timer must be created inside the runtime.
+    runtime
+        .block_on(async { tokio::time::timeout(limit, future).await })
+        .map_err(|_| anyhow!("{what} timed out after {} s", limit.as_secs()))
+}
+
+/// What this process knows about one `gateway_*.json` file. Event files are
+/// never rewritten and this process holds the journal lock, so a settled
+/// file stays settled and a pending one changes only when processed here.
+#[derive(Debug, PartialEq, Eq)]
+enum Tracked {
+    /// A terminal record, or an event this publisher never sends.
+    Settled(Outcome),
+    /// Re-read only once `retry_at` passes or its proof arrives.
+    Pending {
+        timestamp: DateTime<Utc>,
+        retry_at: i64,
+        awaiting: bool,
+        /// The proof that makes it due early; cleared once it failed to.
+        receipt: Option<String>,
+    },
+    /// Retried every pass; logged again only when the error changes.
+    Broken(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    Confirmed,
+    Expired,
+    Ignored,
+    /// Wrong schema, not live, before activation, invalid ID or no sender.
+    Ineligible,
+}
+
+impl Tracked {
+    fn of(timestamp: DateTime<Utc>, delivery: &Delivery) -> Self {
+        match delivery.status {
+            Status::Queued | Status::AwaitingProof => Self::Pending {
+                timestamp,
+                retry_at: delivery.retry_at,
+                awaiting: delivery.status == Status::AwaitingProof,
+                receipt: (delivery.status == Status::AwaitingProof)
+                    .then(|| delivery.receipt_hash.clone())
+                    .flatten(),
+            },
+            Status::TransportConfirmed => Self::Settled(Outcome::Confirmed),
+            Status::Expired => Self::Settled(Outcome::Expired),
+            Status::PolicyRejected | Status::NoMessage | Status::Ignored => {
+                Self::Settled(Outcome::Ignored)
+            }
+        }
+    }
+
+    /// The event's timestamp when it should be processed now.
+    fn due(&self, now: i64, proven: &impl Fn(&str) -> bool) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Pending {
+                timestamp,
+                retry_at,
+                receipt,
+                ..
+            } if *retry_at <= now || receipt.as_deref().is_some_and(proven) => Some(*timestamp),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct Backlog {
+    queued: usize,
+    awaiting: usize,
+    confirmed: usize,
+    expired: usize,
+    ignored: usize,
+    unreadable: usize,
+}
+
+impl fmt::Display for Backlog {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} queued, {} awaiting proof, {} confirmed, {} expired, {} ignored",
+            self.queued, self.awaiting, self.confirmed, self.expired, self.ignored
+        )?;
+        if self.unreadable > 0 {
+            write!(f, ", {} unreadable", self.unreadable)?;
+        }
+        Ok(())
+    }
+}
+
+struct Job {
+    file: String,
+    event: GatewayEvent,
+    delivery: Delivery,
+    record: PathBuf,
+}
+
+/// Selects due events from the output directory. Memory is one entry per
+/// `gateway_*.json` file currently in the directory: its name plus a small
+/// state (a receipt hash at most). Entries for removed files are dropped.
+struct Queue {
+    journal: PathBuf,
+    active_after: DateTime<Utc>,
+    unidentified: Option<String>,
+    files: HashMap<String, (Tracked, u64)>,
+    pass: u64,
+    listing_error: Option<String>,
+}
+
+impl Queue {
+    fn new(journal: PathBuf, active_after: DateTime<Utc>, unidentified: Option<String>) -> Self {
+        Self {
+            journal,
+            active_after,
+            unidentified,
+            files: HashMap::new(),
+            pass: 0,
+            listing_error: None,
+        }
+    }
+
+    /// Up to `JOBS_PER_PASS` due events, oldest first. One unreadable entry
+    /// never blocks the others.
+    fn due(
+        &mut self,
+        directory: &Path,
+        now: i64,
+        proven: impl Fn(&str) -> bool,
+    ) -> Result<Vec<Job>> {
+        self.pass += 1;
+        let mut due = Vec::new();
+        let mut listing_error = None;
+        for entry in directory.read_dir()? {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    let message = error.to_string();
+                    if self.listing_error.as_ref() != Some(&message) {
+                        log(format_args!(
+                            "Skipping unreadable entry in {}: {message}",
+                            directory.display()
+                        ));
+                    }
+                    listing_error = Some(message);
+                    continue;
+                }
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name
+                .strip_prefix("gateway_")
+                .and_then(|rest| rest.strip_suffix(".json"))
+                .is_none()
+            {
+                continue;
+            }
+            let timestamp = match self.files.get_mut(&name) {
+                Some((tracked, seen)) if !matches!(tracked, Tracked::Broken(_)) => {
+                    *seen = self.pass;
+                    tracked.due(now, &proven)
+                }
+                _ => self.classify(&name, &entry.path(), now, &proven),
+            };
+            if let Some(timestamp) = timestamp {
+                due.push((timestamp, name));
+            }
+        }
+        self.listing_error = listing_error;
+        let pass = self.pass;
+        self.files.retain(|_, (_, seen)| *seen == pass);
+        due.sort_unstable();
+        due.truncate(JOBS_PER_PASS);
+        Ok(due
+            .into_iter()
+            .filter_map(|(_, name)| {
+                let path = directory.join(&name);
+                self.load(&name, &path)
+            })
+            .collect())
+    }
+
+    fn classify(
+        &mut self,
+        name: &str,
+        path: &Path,
+        now: i64,
+        proven: &impl Fn(&str) -> bool,
+    ) -> Option<DateTime<Utc>> {
+        let (event, delivery, _) = self.read(name, path)?;
+        let tracked = match delivery {
+            Some(delivery) => Tracked::of(event.timestamp, &delivery),
+            None => Tracked::Settled(Outcome::Ineligible),
+        };
+        let due = tracked.due(now, proven);
+        self.files.insert(name.into(), (tracked, self.pass));
+        due
+    }
+
+    fn load(&mut self, name: &str, path: &Path) -> Option<Job> {
+        let (event, delivery, record) = self.read(name, path)?;
+        Some(Job {
+            file: name.into(),
+            event,
+            delivery: delivery?,
+            record,
+        })
+    }
+
+    /// The event and, when it is eligible, its delivery record. Errors are
+    /// remembered and logged once per distinct message.
+    fn read(
+        &mut self,
+        name: &str,
+        path: &Path,
+    ) -> Option<(GatewayEvent, Option<Delivery>, PathBuf)> {
+        let event = match File::open(path)
+            .map_err(|error| {
+                format!(
+                    "Skipping unreadable gateway event {}: {error}",
+                    path.display()
+                )
+            })
+            .and_then(|file| {
+                serde_json::from_reader::<_, GatewayEvent>(std::io::BufReader::new(file)).map_err(
+                    |error| format!("Skipping invalid gateway event {}: {error}", path.display()),
+                )
+            }) {
+            Ok(event) => event,
+            Err(message) => return self.broken(name, message),
+        };
+        let record = self.journal.join(format!("{}.json", event.id));
+        if !self.eligible(&event) {
+            return Some((event, None, record));
+        }
+        let delivery = match fs::read(&record) {
+            Ok(json) => match serde_json::from_slice::<Delivery>(&json) {
+                Ok(delivery) => delivery,
+                Err(error) => {
+                    return self.broken(
+                        name,
+                        format!(
+                            "Preserving invalid Fabric delivery record {}: {error}",
+                            record.display()
+                        ),
+                    );
+                }
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => Delivery::default(),
+            Err(error) => {
+                return self.broken(
+                    name,
+                    format!(
+                        "Skipping unreadable Fabric delivery record {}: {error}",
+                        record.display()
+                    ),
+                );
+            }
+        };
+        Some((event, Some(delivery), record))
+    }
+
+    fn broken<T>(&mut self, name: &str, message: String) -> Option<T> {
+        if !matches!(self.files.get(name), Some((Tracked::Broken(old), _)) if *old == message) {
+            log(&message);
+        }
+        self.files
+            .insert(name.into(), (Tracked::Broken(message), self.pass));
+        None
+    }
+
+    /// Never changes for this process: the event file, activation time and
+    /// configuration are all fixed.
+    fn eligible(&self, event: &GatewayEvent) -> bool {
+        event.schema == "sdr.gateway.v1"
+            && matches!(event.source, Source::Live)
+            && event.timestamp >= self.active_after
+            && valid_event_id(&event.id)
+            && sender_for(&event.kind, self.unidentified.as_deref()).is_some()
+    }
+
+    fn update(&mut self, name: &str, timestamp: DateTime<Utc>, delivery: &Delivery) {
+        let pass = self.pass;
+        self.files
+            .insert(name.into(), (Tracked::of(timestamp, delivery), pass));
+    }
+
+    /// Stops an arrived proof from making this event due before `retry_at`.
+    fn defer(&mut self, name: &str) {
+        if let Some((Tracked::Pending { receipt, .. }, _)) = self.files.get_mut(name) {
+            *receipt = None;
+        }
+    }
+
+    fn forget(&mut self, name: &str) {
+        self.files.remove(name);
+    }
+
+    fn backlog(&self) -> Backlog {
+        let mut backlog = Backlog::default();
+        for (tracked, _) in self.files.values() {
+            match tracked {
+                Tracked::Pending {
+                    awaiting: false, ..
+                } => backlog.queued += 1,
+                Tracked::Pending { awaiting: true, .. } => backlog.awaiting += 1,
+                Tracked::Settled(Outcome::Confirmed) => backlog.confirmed += 1,
+                Tracked::Settled(Outcome::Expired) => backlog.expired += 1,
+                Tracked::Settled(Outcome::Ignored) => backlog.ignored += 1,
+                Tracked::Settled(Outcome::Ineligible) => {}
+                Tracked::Broken(_) => backlog.unreadable += 1,
+            }
+        }
+        backlog
     }
 }
 
@@ -190,8 +574,12 @@ impl<'a> Publisher<'a> {
             target,
             senders: HashMap::new(),
             receipts,
-            active_after,
-            journal,
+            queue: Queue::new(
+                journal,
+                active_after,
+                config.identity.unidentified().map(str::to_owned),
+            ),
+            backlog: None,
             _journal_lock: journal_lock,
         };
         for (id, display_name, last_seen) in publisher.registry.known_radios()? {
@@ -216,91 +604,136 @@ impl<'a> Publisher<'a> {
 
     pub fn run(&mut self, events: &Path, stopped: &AtomicBool) {
         let mut next_discovery = Instant::now();
+        let mut last_error = None;
         while !stopped.load(Ordering::Relaxed) {
             if next_discovery <= Instant::now() {
-                self.runtime
-                    .block_on(self.transport.request_path(&self.target, None, None));
+                if let Err(error) = bounded(
+                    &self.runtime,
+                    PATH_REQUEST_TIMEOUT,
+                    "RCH path request",
+                    self.transport.request_path(&self.target, None, None),
+                ) {
+                    log(format_args!("Fabric: {error:#}"));
+                }
                 next_discovery = Instant::now() + Duration::from_secs(15);
             }
             self.announce_due();
-            if let Err(error) = self.scan(events, stopped) {
-                log(format_args!("Fabric queue: {error:#}"));
+            match self.scan(events, stopped) {
+                Ok(()) => last_error = None,
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    if last_error.as_ref() != Some(&message) {
+                        log(format_args!("Fabric queue: {message}"));
+                        last_error = Some(message);
+                    }
+                }
             }
             thread::park_timeout(POLL_INTERVAL);
         }
     }
 
     fn scan(&mut self, directory: &Path, stopped: &AtomicBool) -> Result<()> {
-        let now = Utc::now().timestamp();
-        let mut jobs = Vec::new();
-        for entry in directory.read_dir()? {
-            let entry = entry?;
-            let filename = entry.file_name();
-            let name = filename.to_string_lossy();
-            if !name.starts_with("gateway_") || !name.ends_with(".json") {
-                continue;
-            }
-            let event = match serde_json::from_reader::<_, GatewayEvent>(File::open(entry.path())?)
-            {
-                Ok(event) => event,
-                Err(error) => {
-                    log(format_args!(
-                        "Skipping invalid gateway event {}: {error}",
-                        entry.path().display()
-                    ));
-                    continue;
-                }
-            };
-            if event.schema != "sdr.gateway.v1"
-                || !matches!(event.source, Source::Live)
-                || event.timestamp < self.active_after
-                || !valid_event_id(&event.id)
-                || sender_for(&event.kind, self.config.identity.unidentified()).is_none()
-            {
-                continue;
-            }
-            let record = self.journal.join(format!("{}.json", event.id));
-            let delivery = match fs::read(&record) {
-                Ok(json) => match serde_json::from_slice::<Delivery>(&json) {
-                    Ok(delivery) => delivery,
-                    Err(error) => {
-                        log(format_args!(
-                            "Preserving invalid Fabric delivery record {}: {error}",
-                            record.display()
-                        ));
-                        continue;
-                    }
-                },
-                Err(error) if error.kind() == ErrorKind::NotFound => Delivery::default(),
-                Err(error) => return Err(error.into()),
-            };
-            if delivery.status.pending() && delivery.retry_at <= now {
-                jobs.push((event, delivery, record));
-                if jobs.len() >= JOBS_PER_PASS {
-                    break;
-                }
-            }
-        }
-        jobs.sort_unstable_by_key(|(event, _, _)| event.timestamp);
-        for (event, mut delivery, receipt_path) in jobs {
+        let receipts = self.receipts.clone();
+        let jobs = self.queue.due(directory, Utc::now().timestamp(), |hash| {
+            receipts.contains(hash)
+        })?;
+        for job in jobs {
             if stopped.load(Ordering::Relaxed) {
                 break;
             }
-            let now = Utc::now().timestamp();
+            self.process(job);
+        }
+        let backlog = self.queue.backlog();
+        if self
+            .backlog
+            .is_none_or(|(last, at)| last != backlog && at.elapsed() >= SUMMARY_INTERVAL)
+        {
+            log(format_args!("Fabric backlog: {backlog}"));
+            self.backlog = Some((backlog, Instant::now()));
+        }
+        Ok(())
+    }
+
+    fn process(&mut self, job: Job) {
+        let Job {
+            file,
+            event,
+            mut delivery,
+            record,
+        } = job;
+        let now = Utc::now().timestamp();
+        let proof_only = delivery.retry_at > now;
+        let outcome = if proof_only {
+            // Not due for another attempt: selected because its proof arrived.
+            let confirmed = self.confirm(&event, &mut delivery, now);
+            (confirmed.is_err() || !delivery.status.pending()).then_some(confirmed)
+        } else {
             delivery.attempts = delivery.attempts.saturating_add(1);
-            delivery.retry_at = now + (2_i64.pow(delivery.attempts.min(7)) * 3).min(300);
+            delivery.retry_at = now + backoff(delivery.attempts, OsRng.next_u32());
             if event.timestamp.timestamp() + DELIVERY_TTL <= now {
                 delivery.status = Status::Expired;
-            } else if let Err(error) = self.send(&event, &mut delivery, now) {
+                None
+            } else {
+                Some(self.send(&event, &mut delivery, now))
+            }
+        };
+        match outcome {
+            Some(Ok(())) => delivery.last_error = None,
+            Some(Err(error)) => {
                 let message = format!("{error:#}");
                 log(format_args!("Fabric deferred {}: {message}", event.id));
                 delivery.last_error = Some(message);
-            } else {
-                delivery.last_error = None;
             }
-            write_atomic(&receipt_path, &serde_json::to_vec_pretty(&delivery)?, true)?;
+            None => {}
+        }
+        let written = serde_json::to_vec_pretty(&delivery)
+            .map_err(anyhow::Error::from)
+            .and_then(|json| write_atomic(&record, &json, true));
+        if let Err(error) = written {
+            log(format_args!(
+                "Fabric could not record {}: {error:#}",
+                record.display()
+            ));
+            self.queue.forget(&file);
+        } else {
+            self.queue.update(&file, event.timestamp, &delivery);
+            if proof_only && delivery.status.pending() {
+                // The proof did not settle it; wait for `retry_at`, whose
+                // attempt checks the inbox again before dispatching.
+                self.queue.defer(&file);
+            }
+        }
+    }
+
+    /// Settles an `AwaitingProof` record whose proof has arrived, without
+    /// dispatching it again.
+    fn confirm(&self, event: &GatewayEvent, delivery: &mut Delivery, now: i64) -> Result<()> {
+        let (id, _, _) = sender_for(&event.kind, self.config.identity.unidentified())
+            .context("event has no radio")?;
+        let sender = self.sender(id)?;
+        if let Some(entry) = Self::stored(sender, &event.id)? {
+            self.settle(sender, &entry, delivery, now)?;
         }
         Ok(())
+    }
+
+    fn sender(&self, id: &str) -> Result<&Sender> {
+        self.senders
+            .get(id)
+            .with_context(|| format!("no Fabric sender for {id:?}"))
+    }
+
+    /// The signed message Fabric already holds for an event.
+    fn stored(
+        sender: &Sender,
+        event_id: &str,
+    ) -> Result<Option<lxmf_runtime::propagation_store::Status>> {
+        let mut known = sender.propagation.application_messages(event_id)?;
+        ensure!(
+            known.len() <= 1,
+            "multiple signed messages already exist for event {event_id}"
+        );
+        Ok(known.pop())
     }
 
     fn send(&mut self, event: &GatewayEvent, delivery: &mut Delivery, now: i64) -> Result<()> {
@@ -314,7 +747,7 @@ impl<'a> Publisher<'a> {
             }
         }
         self.announce_due();
-        let sender = &self.senders[id];
+        let sender = self.sender(id)?;
         delivery.source_destination = Some(sender.hash.clone());
         let (content, fields, kind) = match &event.kind {
             Kind::Transcript {
@@ -348,13 +781,7 @@ impl<'a> Publisher<'a> {
                 return Ok(());
             }
         };
-        let mut known = sender.propagation.application_messages(&event.id)?;
-        ensure!(
-            known.len() <= 1,
-            "multiple signed messages already exist for event {}",
-            event.id
-        );
-        let entry = if let Some(existing) = known.pop() {
+        let entry = if let Some(existing) = Self::stored(sender, &event.id)? {
             existing
         } else {
             let mut request =
@@ -369,9 +796,12 @@ impl<'a> Publisher<'a> {
                     .extensions
                     .insert(EXT_FIELDS_BASE64.into(), json!(STANDARD.encode(fields)));
             }
-            let prepared = self
-                .runtime
-                .block_on(sender.propagation.prepare(&request))?;
+            let prepared = bounded(
+                &self.runtime,
+                PREPARE_TIMEOUT,
+                "message preparation",
+                sender.propagation.prepare(&request),
+            )??;
             sender.propagation.deposit_own(
                 prepared,
                 kind,
@@ -448,40 +878,26 @@ impl<'a> Publisher<'a> {
         now: i64,
         id: &str,
     ) -> Result<()> {
-        delivery.message_id = Some(entry.message_id.clone());
-        if entry.state.terminal() {
-            use lxmf_runtime::propagation_store::State;
-            delivery.status = match entry.state {
-                State::Delivered | State::Acknowledged => Status::TransportConfirmed,
-                _ => Status::Expired,
-            };
+        if self.settle(sender, entry, delivery, now)? {
             return Ok(());
         }
-        if let Some(hash) = &delivery.receipt_hash
-            && self.receipts.take(hash)
-        {
-            sender
-                .propagation
-                .delivered(&entry.transient_id, &entry.message_id, false, now)?;
-            delivery.status = Status::TransportConfirmed;
-            return Ok(());
-        }
-        let report = self.runtime.block_on(sender.propagation.recover_direct(
-            &entry.transient_id,
-            now,
-            delivery.retry_at,
-            PropagationRouteLimits::default(),
-            |_, _| true,
-        ))?;
+        // A proof arriving later settles the record on a later pass.
+        let report = bounded(
+            &self.runtime,
+            RECOVER_TIMEOUT,
+            "direct delivery",
+            sender.propagation.recover_direct(
+                &entry.transient_id,
+                now,
+                delivery.retry_at,
+                PropagationRouteLimits::default(),
+                |_, _| true,
+            ),
+        )??;
         if let Some(report) = report {
             delivery.status = Status::AwaitingProof;
             delivery.receipt_hash.clone_from(&report.receipt_hash);
-            if report.representation == DeliveryRepresentation::Resource
-                || report
-                    .receipt_hash
-                    .as_ref()
-                    .is_some_and(|hash| self.wait_for_proof(hash))
-            {
+            if report.representation == DeliveryRepresentation::Resource {
                 sender
                     .propagation
                     .delivered(&entry.transient_id, &entry.message_id, false, now)?;
@@ -495,25 +911,52 @@ impl<'a> Publisher<'a> {
         Ok(())
     }
 
-    fn wait_for_proof(&self, expected: &str) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            if self.receipts.take(expected) {
-                return true;
-            }
-            thread::sleep(Duration::from_millis(50));
+    /// Settles a record from Fabric's terminal state or an arrived proof.
+    fn settle(
+        &self,
+        sender: &Sender,
+        entry: &lxmf_runtime::propagation_store::Status,
+        delivery: &mut Delivery,
+        now: i64,
+    ) -> Result<bool> {
+        delivery.message_id = Some(entry.message_id.clone());
+        if entry.state.terminal() {
+            use lxmf_runtime::propagation_store::State;
+            delivery.status = match entry.state {
+                State::Delivered | State::Acknowledged => Status::TransportConfirmed,
+                _ => Status::Expired,
+            };
+            return Ok(true);
         }
-        false
+        if let Some(hash) = &delivery.receipt_hash
+            && self.receipts.take(hash)
+        {
+            sender
+                .propagation
+                .delivered(&entry.transient_id, &entry.message_id, false, now)?;
+            delivery.status = Status::TransportConfirmed;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn insert_sender(&mut self, id: &str, name: String, registered: Registered) -> Result<()> {
-        let destination = self.runtime.block_on(self.transport.add_destination(
-            registered.private_identity.clone(),
-            DestinationName::new("lxmf", "delivery"),
-        ));
-        let source = self
-            .runtime
-            .block_on(async { destination.lock().await.desc.address_hash });
+        let (destination, source) = bounded(
+            &self.runtime,
+            DESTINATION_TIMEOUT,
+            "destination registration",
+            async {
+                let destination = self
+                    .transport
+                    .add_destination(
+                        registered.private_identity.clone(),
+                        DestinationName::new("lxmf", "delivery"),
+                    )
+                    .await;
+                let source = destination.lock().await.desc.address_hash;
+                (destination, source)
+            },
+        )?;
         ensure!(
             source == registered.destination,
             "Fabric registered a different delivery destination"
@@ -525,9 +968,9 @@ impl<'a> Publisher<'a> {
             registered.private_identity,
             source,
         );
-        config.link_connect_timeout = Duration::from_secs(4);
+        config.link_connect_timeout = Duration::from_secs(LINK_CONNECT_SECS);
         config.link_connect_attempts = 1;
-        config.resource_transfer_timeout = Duration::from_secs(10);
+        config.resource_transfer_timeout = Duration::from_secs(RESOURCE_TRANSFER_SECS);
         let propagation = InProcessBackend::new(config).local_propagation(
             self.config
                 .fabric
@@ -549,6 +992,7 @@ impl<'a> Publisher<'a> {
     }
 
     fn announce_due(&mut self) {
+        let (runtime, transport) = (&self.runtime, &self.transport);
         for sender in self.senders.values_mut() {
             if sender
                 .last_announce
@@ -570,14 +1014,18 @@ impl<'a> Publisher<'a> {
                     continue;
                 }
             };
-            self.runtime.block_on(async {
-                self.transport
+            let announced = bounded(runtime, ANNOUNCE_TIMEOUT, "announce", async {
+                transport
                     .set_destination_announce_app_data(&sender.destination, Some(data.clone()))
                     .await;
-                self.transport
+                transport
                     .send_announce(&sender.destination, Some(&data))
                     .await;
             });
+            if let Err(error) = announced {
+                log(format_args!("Fabric {:?}: {error:#}", sender.name));
+            }
+            // A failed announce is retried after the interval, not every pass.
             sender.last_announce = Some(Instant::now());
         }
     }
@@ -879,6 +1327,264 @@ mod tests {
         for (id, destination) in known {
             assert_eq!(restarted.senders[id].hash, destination.to_hex_string());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn an_arrived_proof_confirms_on_the_next_pass_without_redispatch() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let address = TcpListener::bind("127.0.0.1:0")?.local_addr()?.to_string();
+        let peer_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let (peer, mut inbox, target) = peer_runtime.block_on(async {
+            let private = PrivateIdentity::new_from_rand(OsRng);
+            let transport =
+                Transport::new(TransportConfig::new("gateway-test-peer", &private, false));
+            let (server, ready) =
+                TcpServer::new(address.clone(), transport.iface_manager()).with_startup_result();
+            transport.add_interface(server, TcpServer::spawn).await;
+            tokio::time::timeout(Duration::from_secs(5), ready)
+                .await??
+                .map_err(|err| anyhow!(err))?;
+            let inbox = transport.received_data_events();
+            let target = transport
+                .add_destination(private, DestinationName::new("lxmf", "delivery"))
+                .await;
+            Ok::<_, anyhow::Error>((transport, inbox, target))
+        })?;
+        let hash = peer_runtime.block_on(async { target.lock().await.desc.address_hash });
+        let mut config = Config::default();
+        config.identity.auto_register = true;
+        config.identity.registry_path = dir.path().join("identity");
+        config.identity.allowlist = ["R4".into()].into();
+        config.fabric.local_storage_path = dir.path().join("fabric");
+        config.fabric.tcp_clients = vec![address];
+        config.rch.enabled = true;
+        config.rch.destination_hash = hash.to_hex_string();
+        let mut publisher = Publisher::open_with_passphrase(&config, "loopback-test-passphrase")?;
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while publisher
+            .runtime
+            .block_on(publisher.transport.destination_identity(&hash))
+            .is_none()
+        {
+            ensure!(Instant::now() < deadline, "gateway did not discover peer");
+            peer_runtime.block_on(peer.send_announce(&target, None));
+            thread::sleep(Duration::from_millis(150));
+        }
+        let output = Output::new(dir.path().join("events"), 435_995_000, false)?;
+        output.save_event(Utc::now(), "gateway", &chat("local-R4-proof", Utc::now()))?;
+        let stopped = AtomicBool::new(false);
+        let mut next_message =
+            |wait| peer_runtime.block_on(async { tokio::time::timeout(wait, inbox.recv()).await });
+        let record = publisher.queue.journal.join("local-R4-proof.json");
+        let read = || -> Result<Delivery> { Ok(serde_json::from_slice(&fs::read(&record)?)?) };
+
+        publisher.scan(output.directory(), &stopped)?;
+        next_message(Duration::from_secs(3))??;
+        let sent = read()?;
+        assert!(sent.status == Status::AwaitingProof && sent.attempts == 1);
+        let receipt: [u8; 32] = hex::decode(sent.receipt_hash.as_deref().context("no receipt")?)?
+            .try_into()
+            .map_err(|_| anyhow!("receipt hash length"))?;
+        // The proof arrives between passes; the record is not yet due again.
+        publisher
+            .receipts
+            .on_receipt(&DeliveryReceipt::new(receipt));
+        publisher.scan(output.directory(), &stopped)?;
+        let confirmed = read()?;
+        assert!(confirmed.status == Status::TransportConfirmed);
+        assert_eq!(
+            (confirmed.attempts, confirmed.retry_at),
+            (sent.attempts, sent.retry_at)
+        );
+        assert!(confirmed.retry_at > Utc::now().timestamp());
+        assert!(
+            next_message(Duration::from_secs(1)).is_err(),
+            "a confirmed event must not be sent again"
+        );
+        assert_eq!(publisher.queue.backlog().confirmed, 1);
+        Ok(())
+    }
+
+    fn chat(id: &str, timestamp: DateTime<Utc>) -> GatewayEvent {
+        GatewayEvent {
+            schema: "sdr.gateway.v1".into(),
+            id: id.into(),
+            timestamp,
+            frequency_hz: 435_995_000,
+            source: Source::Live,
+            kind: Kind::Transcript {
+                radio_id: Some("R4".into()),
+                display_name: Some("R4".into()),
+                bss_event_id: None,
+                unresolved_reason: None,
+                started_at: timestamp,
+                text: "Test".into(),
+                position: None,
+                kodiak: None,
+            },
+        }
+    }
+
+    fn queue() -> Result<(tempfile::TempDir, PathBuf, Queue)> {
+        let dir = tempfile::tempdir()?;
+        let events = dir.path().join("events");
+        let journal = dir.path().join("journal");
+        fs::create_dir_all(&events)?;
+        fs::create_dir_all(&journal)?;
+        let epoch = DateTime::from_timestamp(0, 0).context("epoch")?;
+        Ok((dir, events, Queue::new(journal, epoch, None)))
+    }
+
+    fn write_event(events: &Path, file: &str, event: &GatewayEvent) -> Result<()> {
+        Ok(fs::write(events.join(file), serde_json::to_vec(event)?)?)
+    }
+
+    fn write_record(queue: &Queue, id: &str, delivery: &Delivery) -> Result<()> {
+        let path = queue.journal.join(format!("{id}.json"));
+        Ok(fs::write(path, serde_json::to_vec(delivery)?)?)
+    }
+
+    fn state<'q>(queue: &'q Queue, file: &str) -> &'q Tracked {
+        &queue.files[&format!("gateway_{file}.json")].0
+    }
+
+    #[test]
+    fn due_events_are_selected_oldest_first() -> Result<()> {
+        let (_dir, events, mut queue) = queue()?;
+        let start = Utc::now().timestamp() - 3600;
+        let total = JOBS_PER_PASS + 8;
+        for index in 0..total {
+            // Later file names hold older events, against directory order.
+            let at = DateTime::from_timestamp(start - i64::try_from(index)?, 0).context("time")?;
+            let event = chat(&format!("e{index}"), at);
+            write_event(&events, &format!("gateway_{index:03}.json"), &event)?;
+        }
+        let jobs = queue.due(&events, Utc::now().timestamp(), |_| false)?;
+        let expected: Vec<_> = (0..total)
+            .rev()
+            .take(JOBS_PER_PASS)
+            .map(|index| format!("e{index}"))
+            .collect();
+        let selected: Vec<_> = jobs.into_iter().map(|job| job.event.id).collect();
+        assert_eq!(selected, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_events_and_records_do_not_block_others() -> Result<()> {
+        let (_dir, events, mut queue) = queue()?;
+        let at = Utc::now();
+        fs::write(events.join("gateway_a_corrupt.json"), b"{not json")?;
+        fs::create_dir(events.join("gateway_b_directory.json"))?;
+        write_event(&events, "gateway_c.json", &chat("invalid-record", at))?;
+        fs::write(queue.journal.join("invalid-record.json"), b"[]")?;
+        write_event(&events, "gateway_d.json", &chat("unreadable-record", at))?;
+        fs::create_dir(queue.journal.join("unreadable-record.json"))?;
+        write_event(&events, "gateway_e.json", &chat("good", at))?;
+        for _ in 0..2 {
+            let jobs = queue.due(&events, at.timestamp(), |_| false)?;
+            let selected: Vec<_> = jobs.iter().map(|job| job.event.id.as_str()).collect();
+            assert_eq!(selected, ["good"]);
+        }
+        let backlog = queue.backlog();
+        assert_eq!((backlog.unreadable, backlog.queued), (4, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn settled_and_deferred_events_are_not_reread() -> Result<()> {
+        let (_dir, events, mut queue) = queue()?;
+        let at = Utc::now();
+        let now = at.timestamp();
+        let receipt = "ab".repeat(32);
+        write_event(&events, "gateway_confirmed.json", &chat("confirmed", at))?;
+        let confirmed = Delivery {
+            status: Status::TransportConfirmed,
+            ..Delivery::default()
+        };
+        write_record(&queue, "confirmed", &confirmed)?;
+        let mut replay = chat("replay", at);
+        replay.source = Source::Wav;
+        write_event(&events, "gateway_replay.json", &replay)?;
+        write_event(&events, "gateway_waiting.json", &chat("waiting", at))?;
+        let waiting = Delivery {
+            status: Status::AwaitingProof,
+            attempts: 1,
+            retry_at: now + 60,
+            receipt_hash: Some(receipt.clone()),
+            ..Delivery::default()
+        };
+        write_record(&queue, "waiting", &waiting)?;
+        assert!(queue.due(&events, now, |_| false)?.is_empty());
+        for file in ["confirmed", "replay", "waiting"] {
+            fs::write(events.join(format!("gateway_{file}.json")), b"overwritten")?;
+        }
+        assert!(queue.due(&events, now, |_| false)?.is_empty());
+        assert_eq!(
+            state(&queue, "confirmed"),
+            &Tracked::Settled(Outcome::Confirmed)
+        );
+        assert_eq!(
+            state(&queue, "replay"),
+            &Tracked::Settled(Outcome::Ineligible)
+        );
+        assert!(matches!(state(&queue, "waiting"), Tracked::Pending { .. }));
+        // Its proof makes the deferred event due, so only now is it read again.
+        assert!(queue.due(&events, now, |hash| hash == receipt)?.is_empty());
+        assert!(matches!(state(&queue, "waiting"), Tracked::Broken(_)));
+        fs::remove_file(events.join("gateway_confirmed.json"))?;
+        queue.due(&events, now, |_| false)?;
+        assert!(!queue.files.contains_key("gateway_confirmed.json"));
+        Ok(())
+    }
+
+    #[test]
+    fn backoff_jitter_stays_within_a_fifth_and_under_the_cap() {
+        for attempts in 1..12 {
+            let base = (3 * 2_i64.pow(attempts.min(7))).min(MAX_BACKOFF);
+            let delays: Vec<_> = (0..=200)
+                .map(|step| backoff(attempts, step * 21_474_836))
+                .chain([backoff(attempts, u32::MAX)])
+                .collect();
+            for &delay in &delays {
+                assert!(
+                    delay * 5 >= base * 4 && delay * 5 <= base * 6,
+                    "{delay} vs {base}"
+                );
+                assert!(delay <= MAX_BACKOFF);
+            }
+            assert!(delays.iter().min() < delays.iter().max());
+        }
+    }
+
+    #[test]
+    fn receipt_inbox_recovers_from_poison_and_evicts_the_oldest() -> Result<()> {
+        let inbox = ReceiptInbox::default();
+        let poisoner = inbox.clone();
+        let outcome = thread::spawn(move || {
+            let _guard = poisoner.0.lock();
+            panic!("poison the receipt inbox");
+        })
+        .join();
+        assert!(outcome.is_err() && inbox.0.is_poisoned());
+        let receipt = |index: usize| -> Result<[u8; 32]> {
+            let mut hash = [0_u8; 32];
+            hash[..2].copy_from_slice(&u16::try_from(index)?.to_be_bytes());
+            Ok(hash)
+        };
+        inbox.on_receipt(&DeliveryReceipt::new(receipt(0)?));
+        assert!(inbox.take(&hex::encode(receipt(0)?)));
+        assert!(!inbox.take(&hex::encode(receipt(0)?)));
+        for index in 0..=RECEIPT_CAPACITY {
+            inbox.on_receipt(&DeliveryReceipt::new(receipt(index)?));
+        }
+        assert_eq!(inbox.lock().hashes.len(), RECEIPT_CAPACITY);
+        assert!(!inbox.contains(&hex::encode(receipt(0)?)));
+        assert!(inbox.contains(&hex::encode(receipt(1)?)));
+        assert!(inbox.contains(&hex::encode(receipt(RECEIPT_CAPACITY)?)));
         Ok(())
     }
 }

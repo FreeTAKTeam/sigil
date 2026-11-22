@@ -24,8 +24,9 @@ mod result;
 mod wake;
 
 pub use engine::{
-    AUDIO_SAMPLE_RATE_HZ, Addressed, AudioInput, Classification, Engine, IntentClassifier,
-    KodiakError, TextInput, Transcriber,
+    ASR_RETRY_INTERVAL, AUDIO_SAMPLE_RATE_HZ, Addressed, AudioInput, Classification,
+    DEFAULT_MAX_AUDIO_SECONDS, DEFAULT_MAX_COMMAND_WORDS, Engine, IntentClassifier, KodiakError,
+    TextInput, Transcriber,
 };
 pub use result::{
     Affiliation, CONTACT_REPORT, Category, ContactReport, ContractError, Coordinates, Correction,
