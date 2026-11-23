@@ -6,6 +6,8 @@
 
 R3AKT Sigil receives analog narrowband FM on an RTL-SDR. It transcribes speech locally, decodes BSS radio IDs and position reports, and can publish to RCH from a persistent LXMF identity for each authorized radio. The default channel is 435.9950 MHz.
 
+See the [BSS radio compatibility matrix](docs/bss-radio-compatibility.md) for verified and prospective radio models, caveats, and the RF acceptance checklist.
+
 ## Run the embedded gateway
 
 Copy `gateway.example.toml` to `gateway.toml`. Set `[identity].allowlist` to the radios you operate, `[fabric].tcp_clients` to your Reticulum TCP interfaces, and `[rch].destination_hash` to the hub’s LXMF delivery hash. Set `[rch].enabled = true` after checking the recipient. `[identity].auto_register` permits the first registration of allowlisted radios.
