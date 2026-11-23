@@ -139,7 +139,10 @@ impl QuestionSet {
         let mut commands: Vec<(String, Vec<String>)> = Vec::new();
         for command in &rch.commands {
             let phrases = command.phrases.iter().take(3).cloned();
-            match commands.iter_mut().find(|(name, _)| *name == command.intent) {
+            match commands
+                .iter_mut()
+                .find(|(name, _)| *name == command.intent)
+            {
                 Some((_, all)) => all.extend(phrases),
                 None => commands.push((command.intent.clone(), phrases.collect())),
             }
@@ -157,19 +160,34 @@ impl QuestionSet {
     }
 
     /// Step 3b: is the first word of the command a severity word? Asked of
-    /// `word` alone, with one option per spoken form.
+    /// `word` alone, with one option per spoken form, in chunks of at most
+    /// [`MAX_OPTIONS`].
     #[must_use]
     pub fn severity(&self) -> Vec<(String, Ask)> {
-        let mut options: Vec<(String, String)> = self
+        // Like `chunked`, but the extra option says the word is not a
+        // severity at all.
+        let options: Vec<(String, String)> = self
             .severity_words
             .iter()
             .map(|s| (s.word.clone(), s.word.clone()))
             .collect();
-        options.push((NOT_A_SEVERITY.into(), "another word".into()));
-        vec![(
-            "severity".into(),
-            Ask::choice(&format!("Which word is `{WORD}`?"), options),
-        )]
+        let per = MAX_OPTIONS - 1;
+        let count = options.len().div_ceil(per).max(1);
+        let size = options.len().div_ceil(count).max(1);
+        options
+            .chunks(size)
+            .enumerate()
+            .map(|(index, chunk)| {
+                let mut chunk = chunk.to_vec();
+                chunk.push((NOT_A_SEVERITY.into(), "another word".into()));
+                let key = if count == 1 {
+                    "severity".to_owned()
+                } else {
+                    format!("severity{index}")
+                };
+                (key, Ask::choice(&format!("Which word is `{WORD}`?"), chunk))
+            })
+            .collect()
     }
 
     /// The spoken severity word behind an option label.

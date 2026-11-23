@@ -13,6 +13,7 @@ mod radios;
 mod replay;
 mod telemetry;
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -101,6 +102,17 @@ fn kodiak(
         .with_transcriber_loader(move || kodiak_asr::load(backend.asr(), &model)))
 }
 
+/// The Kodiak engine for the WAV modes: the `[kodiak]` section and wake words
+/// of `config` when given, as in `listen`, otherwise the defaults.
+fn offline_kodiak(config: Option<&Path>, backend: Backend, model: &Path) -> Result<Engine> {
+    let config = config
+        .map(config::Config::load)
+        .transpose()?
+        .unwrap_or_default();
+    let wake = WakeWord::with_forms(&config.kodiak.wake_words);
+    kodiak(backend, model, wake, &config.kodiak)
+}
+
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -162,6 +174,9 @@ enum Command {
     Wav {
         /// PCM or float WAV (8–192 kHz, up to five minutes).
         input: PathBuf,
+        /// Gateway settings whose `[kodiak]` section and wake words to use.
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     /// Decode BSS from a demodulated audio WAV.
     BssWav {
@@ -184,10 +199,13 @@ enum Command {
         /// Squelch-open interval in the recording, in `START_MS:END_MS` form. Repeat as needed.
         #[arg(long, required = true)]
         rf_open: Vec<replay::CarrierInterval>,
-        #[arg(long, default_value_t = 5_000, value_parser = clap::value_parser!(u64).range(200..=30_000))]
+        #[arg(long, default_value_t = correlation::Timing::DEFAULT_WINDOW_MS, value_parser = clap::value_parser!(u64).range(200..=30_000))]
         correlation_timeout_ms: u64,
         #[arg(long, default_value_t = correlation::Timing::DEFAULT_TRAILING_GAP_MS, value_parser = clap::value_parser!(u64).range(0..=10_000))]
         trailing_id_gap_ms: u64,
+        /// Gateway settings whose `[kodiak]` section and wake words to use.
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 }
 
@@ -266,14 +284,9 @@ fn main() -> Result<()> {
                 publication,
             )
         }
-        Command::Wav { input } => {
+        Command::Wav { input, config } => {
             let audio = audio::read_wav(&input)?;
-            let engine = kodiak(
-                common.backend,
-                model,
-                WakeWord::default(),
-                &config::Kodiak::default(),
-            )?;
+            let engine = offline_kodiak(config.as_deref(), common.backend, model)?;
             log(format_args!("Transcribing WAV {}", input.display()));
             let now = Utc::now();
             output
@@ -300,6 +313,7 @@ fn main() -> Result<()> {
             rf_open,
             correlation_timeout_ms,
             trailing_id_gap_ms,
+            config,
         } => replay::run(
             &input,
             &rf_open,
@@ -308,12 +322,7 @@ fn main() -> Result<()> {
                 trailing_gap_ms: trailing_id_gap_ms,
             },
             &output,
-            &kodiak(
-                common.backend,
-                model,
-                WakeWord::default(),
-                &config::Kodiak::default(),
-            )?,
+            &offline_kodiak(config.as_deref(), common.backend, model)?,
         ),
         Command::Radios { .. } => unreachable!("handled before the output directory is created"),
     }
@@ -330,6 +339,9 @@ fn bss_wav(path: &Path, diagnostics: bool, output: &Output) -> Result<()> {
     log(format_args!("Decoding BSS from WAV {}", path.display()));
     for chunk in audio.chunks(capture::AUDIO_FRAME_LEN) {
         decoder.feed(chunk, Utc::now(), output)?;
+        if let Some(failure) = decoder.take_failures().into_iter().next() {
+            anyhow::bail!(failure);
+        }
     }
     decoder.finish()
 }
@@ -367,37 +379,61 @@ fn listen(
     let publisher_stopped = AtomicBool::new(false);
     thread::scope(|scope| {
         let stopped_publishing = &publisher_stopped;
+        let receiver_stopped: &AtomicBool = &stopped;
+        // A publisher panic stops the receiver: capturing on with nothing
+        // published would look healthy while the hub hears nothing.
         let worker = publication.map(|mut publisher| {
-            scope.spawn(move || publisher.run(output.directory(), stopped_publishing))
+            scope.spawn(move || {
+                let outcome = catch_unwind(AssertUnwindSafe(|| {
+                    publisher.run(output.directory(), stopped_publishing);
+                }));
+                if outcome.is_err() {
+                    log("RCH publisher panicked; stopping the receiver");
+                    receiver_stopped.store(true, Ordering::Relaxed);
+                }
+                outcome.is_ok()
+            })
         });
-        let result = processing::run(output, Source::Live, timing, transcribe, data, |ingress| {
-            radio::receive(
-                &receiver,
-                demodulator,
-                settings.squelch_dbfs.is_none(),
-                settings.monitor_power,
-                &stopped,
-                |event| {
-                    match event {
-                        radio::Event::Ready => log(format_args!("Listening on {frequency}")),
-                        radio::Event::Frame {
-                            open,
-                            audio,
-                            discriminator_audio,
-                            at,
-                        } => {
-                            ingress.push(open, audio, discriminator_audio, at);
+        let result = processing::run(
+            output,
+            Source::Live,
+            timing,
+            transcribe,
+            data,
+            &stopped,
+            |ingress| {
+                radio::receive(
+                    &receiver,
+                    demodulator,
+                    settings.squelch_dbfs.is_none(),
+                    settings.monitor_power,
+                    &stopped,
+                    |event| {
+                        match event {
+                            radio::Event::Ready => log(format_args!("Listening on {frequency}")),
+                            radio::Event::Frame {
+                                open,
+                                audio,
+                                discriminator_audio,
+                                at,
+                            } => {
+                                ingress.push(open, audio, discriminator_audio, at);
+                            }
+                            radio::Event::Lost { frames } => ingress.skip(frames),
                         }
-                    }
-                    Ok(())
-                },
-            )
-        });
+                        Ok(())
+                    },
+                )
+            },
+        );
         publisher_stopped.store(true, Ordering::Relaxed);
-        if let Some(worker) = worker {
+        let published = worker.is_none_or(|worker| {
             worker.thread().unpark();
-        }
-        result
+            worker.join().unwrap_or(false)
+        });
+        result?;
+        anyhow::ensure!(published, "RCH publisher panicked");
+        Ok(())
     })?;
     log("Receiver stopped");
     Ok(())

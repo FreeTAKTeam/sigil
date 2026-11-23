@@ -18,7 +18,7 @@ The `laya/1` questions asked laya abstract judgements about the whole transcript
 3. **Kodiak:** read the rest of the message.
    - **MECP** when the first word is a severity:
      - laya is asked "Which word is `word`?", with `word` set to that word alone.
-     - There is one option per spoken form: mayday, may (of "may day" or "may they"), urgent, urgently, safety, routine, normal, other.
+     - There is one option per spoken form: mayday, may (of "may day" or "may they"), urgent, urgently, safety, routine, normal, other. Since MECP revision 9 there are ten spoken forms (made, medei and urging added), asked as two questions of five.
      - Probabilities of forms with the same level are summed.
      - The event is then read from the text after the severity word.
    - **Contact report** (affiliation, direction, distance): these are values, so the deterministic parser decides. Yes/no questions to laya ("does it give a distance?") reached only 0.3–0.8 on real contact reports.
@@ -34,7 +34,7 @@ The `laya/1` questions asked laya abstract judgements about the whole transcript
   - laya does not guess MECP events. "Broke a leg" became M01 injury at 0.92, "need fod" became S01 at 1.00, and multilingual read "fell" as P01 stranded.
   - laya may not move a message the rules placed in a family. Multilingual read "urgent someone fell and broke a leg" as the hub command `help`.
 
-**laya-only mode** lets laya pick the severity, MECP code (all 114 codes in 13 questions of ≤ 10 options, with need and have for the same supply in the same question) and hub command. Values still come from the parsers. **Rules mode** runs the same flow without laya, to show what laya itself adds.
+**laya-only mode** lets laya pick the severity, MECP code (all 108 codes in 12 questions of ≤ 10 options, with need and have for the same supply in the same question) and hub command. Values still come from the parsers. **Rules mode** runs the same flow without laya, to show what laya itself adds.
 
 Tools:
 - `examples/probe.rs` prints every distribution question by question.
@@ -118,7 +118,7 @@ cargo run --release -p kodiak-laya --example probe -- models/laya/english "norma
 ## Follow-up: deterministic/3
 
 Both recommendations above are done:
-- `DeterministicClassifier::addressed` now applies the first-word check (`kodiak_intent::first_word_wake`, shared with `kodiak-laya`).
+- `DeterministicClassifier::addressed` now applies the first-word check (`kodiak_intent::first_word_wake`, shared with `kodiak-laya`). It now measures against the engine's primary activation word rather than a fixed "kodiak".
 - "normal" is a routine severity word in `mecp/v1.toml`.
 
 The rules are versioned `deterministic/3`. `laya/2` hybrid now only asks laya for first words the vocabularies don't know, so "normal" no longer reaches laya. The no-laya `rules` mode is removed, because `deterministic/3` is that flow.

@@ -161,7 +161,11 @@ mod parakeet {
             config.model_config.model_type = Some("nemo_transducer".into());
             config.model_config.num_threads = super::recognition_threads();
             OfflineRecognizer::create(&config).map(Self).ok_or_else(|| {
-                super::unavailable(format!("load Parakeet TDT v2 from {}", directory.display()))
+                super::unavailable(format!(
+                    "load Parakeet TDT v2 from {}: Sherpa-ONNX reports no cause; \
+                     see its log output",
+                    directory.display()
+                ))
             })
         }
     }

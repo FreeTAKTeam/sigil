@@ -1,6 +1,6 @@
 # R3AKT Kodiak in Sigil
 
-Kodiak is a reusable, offline voice-command engine. Sigil passes it each received voice clip and acts on what comes back. Kodiak lives in this workspace for now as three independent packages; [KODIAK_EXTRACTION.md](../KODIAK_EXTRACTION.md) explains how they move to `FreeTAKTeam/R3AKT-Kodiak`.
+Kodiak is a reusable, offline voice-command engine. Sigil passes it each received voice clip and acts on what comes back. Kodiak lives in this workspace for now as four independent packages; [KODIAK_EXTRACTION.md](../KODIAK_EXTRACTION.md) explains how they move to `FreeTAKTeam/R3AKT-Kodiak`.
 
 ## Processing sequence
 
@@ -26,15 +26,20 @@ Kodiak transcribes, gates and classifies. It never executes commands, publishes 
 | `kodiak-core` | `serde`, `serde_json` | none | `KodiakResult` contract, `WakeWord`, `Engine`, `Transcriber` and `IntentClassifier` traits |
 | `kodiak-asr` | `kodiak-core` | `whisper` (default), `parakeet` | Recognizers taken from Sigil's former `transcription.rs` |
 | `kodiak-intent` | `kodiak-core`, `serde`, `toml` | none | Vocabularies, `DeterministicClassifier`, datasets, examples |
-| `kodiak-laya` | `kodiak-core`, `kodiak-intent`, `laya-candle` | none | Optional `LayaClassifier` (`laya/1`), the `evaluate_laya` and `probe` examples. Built only with Sigil's `laya` feature. Binaries that include it are GPLv3-or-later (see its `NOTICE`). |
+| `kodiak-laya` | `kodiak-core`, `kodiak-intent`, `laya-candle` | none | Optional `LayaClassifier` (`laya/2`), the `evaluate_laya`, `probe` and `probe_json` examples. Built only with Sigil's `laya` feature. Binaries that include it are GPLv3-or-later (see its `NOTICE`). |
 
-Text-only use needs only `kodiak-core` and `kodiak-intent`, and loads no speech model. `Engine::with_transcriber_loader` loads the speech model on the first audio message. One `Engine` is `Send + Sync`, and Sigil shares a single engine, and so a single loaded model, across every radio it hears.
+Text-only use needs only `kodiak-core` and `kodiak-intent`, and loads no speech model. `Engine::with_transcriber_loader` loads the speech model on the first audio message and keeps the loader. A failed load is reported for each audio message and retried at most once every 30 s (`ASR_RETRY_INTERVAL`). If the recognizer panics, the panic reaches the caller, and the next audio message discards that recognizer and loads the model again. One `Engine` is `Send + Sync`, and Sigil shares a single engine, and so a single loaded model, across every radio it hears.
 
 The API is synchronous. Recognition and classification are CPU-bound and Sigil runs them on its ASR worker thread; async callers should use a blocking thread pool.
 
+Input bounds:
+
+- Audio longer than `DEFAULT_MAX_AUDIO_SECONDS` (300 s; `Engine::with_max_audio_seconds`) is refused with `KodiakError::InvalidAudio` before recognition.
+- A command of more than `DEFAULT_MAX_COMMAND_WORDS` (128; `Engine::with_max_command_words`) words after the activation word is rejected as `invalid_parameter` without being classified. A transcript without the activation word that is longer than this plus one word stays chat, without asking the classifier whether it addresses Kodiak.
+
 ## Result contract `kodiak.result.v2`
 
-Every result carries `"schema": "kodiak.result.v2"` and a `type`. Intents and rejections also record the classifier and the version of each vocabulary it used (`"vocabularies":{"contact":"1.3","mecp":"1.6","rch":"1.1"}`, omitted below).
+Every result carries `"schema": "kodiak.result.v2"` and a `type`. Intents and rejections also record the classifier and the version of each vocabulary it used (`"vocabularies":{"contact":"1.3","mecp":"1.9","rch":"1.1"}`, omitted below).
 
 ```json
 {"schema":"kodiak.result.v2","type":"chat","content":"We need more food at the camp."}
@@ -66,18 +71,19 @@ Every result carries `"schema": "kodiak.result.v2"` and a `type`. Intents and re
 - **Contact directions:** a contact report has either `direction_type: relative_clock` with `relative_bearing_deg` (12 o'clock is 0°, and half hours add 15°), or `direction_type: compass_bearing` with `bearing_deg`.
 - **Optional contact fields:** `classification`, `quantity` and `activity`.
 - **Corrections:** an intent or rejection lists every transcribed word that was read as a different vocabulary word, for example `"corrections":[{"heard":"meet","read_as":"need"}]`. The field is omitted when every word matched exactly.
-- **Confidence:** only a classifier that produces a calibrated probability reports `confidence` (for example `laya/2`). `deterministic/3` never does, and Kodiak never invents one.
-- **Misheard activation word:** a classifier may judge that a transcript without the activation word still addresses Kodiak (`IntentClassifier::addressed`). The removed word is then listed first in `corrections`, read as `kodiak`. `deterministic/5` accepts a first word of 4 letters or more within three edits of "kodiak", where letters that sound alike over radio (c/k, a/o, …) count as half an edit, such as "Kardiac", "Cardiac", "Podax" or "Codeac", but only when the rest of the transcript is a recognized command; otherwise the transcript stays chat. A repeated activation word at the start ("Kodiak Kodiak routine heading home") is dropped.
+- **Confidence:** only a classifier that produces a calibrated probability reports `confidence` (for example `laya/2`). `deterministic/5` never does, and Kodiak never invents one.
+- **Misheard activation word:** a classifier may judge that a transcript without the activation word still addresses Kodiak (`IntentClassifier::addressed(transcript, wake)`, given the engine's `WakeWord`). The removed word is then listed first in `corrections`, read as the primary activation word (the first configured spelling, `kodiak` by default). `deterministic/5` accepts a first word of 4 letters or more within three edits of the primary activation word, where letters that sound alike over radio (c/k, a/o, …) count as half an edit, such as "Kardiac", "Cardiac", "Podax" or "Codeac" for "kodiak", but only when the rest of the transcript is a recognized command; otherwise the transcript stays chat. The classifier may return its classification with `Addressed`, and the engine then uses it instead of classifying again.
+- **Repeated activation word:** the engine drops activation words, in any configured spelling, at the start of the command ("Kodiak Kodiak routine heading home", "Kodiak, Codiak. routine heading home").
 - **Strict decoding:** an unknown schema version, or an intent whose category doesn't match, fails to decode.
 
 ## Vocabularies (schema version 1)
 
 The vocabulary files are in `crates/kodiak-intent/vocabularies/`, embedded at compile time and validated when loaded. Each file has a schema `version` and a content `revision`; results record them as `version.revision`. Loading fails on an unknown field, a phrase claimed by two codes, an alias repeated in one list, a word with two roles (for example a filler that is also a negation), a parameter keyword or language name that is also an event phrase, a conflict naming an unknown code, or an alias that is not lower case.
 
-- **MECP (`mecp/v1.toml`, revision 8).**
+- **MECP (`mecp/v1.toml`, revision 9).**
   - Contains the 4 severities and all 108 event codes shared by REM (`apps/mobile/src/utils/mecp.ts`) and RCH (`crates/r3akt-profile-rch/src/lib.rs`).
   - Kodiak adds only spoken phrases; it doesn't redefine any code.
-  - A report needs exactly one severity word (mayday, urgent, safety, routine) and one or more events. Spoken variants heard on the radio are also accepted: "may day", "may they" and "made a" for mayday, "normal" for routine.
+  - A report needs exactly one severity word (mayday, urgent, safety, routine) and one or more events. Spoken variants heard on the radio are also accepted: "may day", "may they" and "made a" for mayday, "urging" for urgent, "normal" for routine.
   - **Several events:** "mayday injured, broken leg, need water" is `MECP/0/M01 M07 S01`, in spoken order; a repeated event is sent once. The report is rejected as `ambiguous` when two event phrases cross ("need water rescue": S01 or T11), and as `contradictory` when it names events listed together under `[[conflicts]]` (need water and have water, all clear and send rescue, and so on) or two severities.
   - **Structured values** (`[parameters]`, `[languages]`), encoded in the canonical MECP order `codes pax lat,lon #ref eta @lang @hhmm ~callsign text`:
     - person count: "four people", "5 pax" → `4pax`; H07 also takes a bare number ("space for five");
@@ -88,7 +94,7 @@ The vocabulary files are in `crates/kodiak-intent/vocabularies/`, embedded at co
   - **Callsigns and references** may contain only numbers and phonetic-alphabet words (`identifier_words`). Any other word rejects the report, so "callsign Revo Six" (a misheard "Bravo Six") is never sent as `~REVO-6`. An ordinal is read as its number ("Bravo Sixth" → `BRAVO-6`). "cosign" and "cold sign" are accepted as the callsign keyword, as Parakeet wrote it on air.
   - **Negations:** a negation that is not part of an event phrase cancels the report ("mayday don't need water"). "not breathing", "no water" and "cancel beacon" are events.
   - B04 is left out because it exists in REM only; RCH reports it as unknown.
-- **Contact (`contact/v1.toml`, revision 2).** The standard form is Description, Distance, Direction ("hostile, 300 meters, 6 o'clock"), but the parts may come in any order.
+- **Contact (`contact/v1.toml`, revision 3).** The standard form is Description, Distance, Direction ("hostile, 300 meters, 6 o'clock"), but the parts may come in any order.
   - **Affiliation:** friendly, hostile, neutral, unknown or suspect, kept separate from the classification.
   - **Direction:** a clock position relative to the operator's heading (whole and half hours, spoken or written as `3:30` or `330`), or an absolute bearing: `bearing two seven zero`, `bearing two seventy`, `270 degrees`, or an 8-point compass direction. Absolute bearings are never turned into clock positions or the other way round.
   - **Distance:** in metres or kilometres, including "half a kilometer", "a kilometer" and "quarter of a klick", up to `max_distance_m` (100 km). Zero, negative or two different distances are rejected. "One" with a plural unit ("one meters") is rejected as `ambiguous`: on air it was "one hundred meters" with "hundred" dropped.
@@ -122,7 +128,7 @@ Multi-word and plural severity spellings ("may day", "may they", "maydays") are 
 
 **laya (21 November 2026):** `crates/kodiak-laya` puts a laya-candle typed-decision model behind `IntentClassifier`. Its second design (`laya/2`) matches the rules on the evaluation set and adds one paraphrased hub command, but no live radio case beyond `deterministic/3`, so it is off by default. The numbers and reasons are in [kodiak-laya-benchmark.md](kodiak-laya-benchmark.md).
 
-The deterministic classifier with fuzzy correction (`deterministic/3`) is the shipped baseline. Research on 21 November 2026 found the following about "Intent-SLM":
+The deterministic classifier with fuzzy correction (now `deterministic/5`) is the shipped baseline. Research on 21 November 2026 found the following about "Intent-SLM":
 
 - **No downloadable weights.** The only matching project is `piyush9786/Intent-SLM` on GitHub. It is MIT-licensed and based on `microsoft/MiniLM-L12-H384-uncased`, which is also MIT. Its repository holds a tokenizer and configuration files, but no ONNX or safetensors weights.
 - **Wrong labels.** Its intent head is trained on the 7 SNIPS intents (music, weather and so on), so it cannot recognize R3AKT commands without retraining.
@@ -194,11 +200,13 @@ The 15 new distinct transcripts are also `live` cases; the two wrong distances a
 
 **Fourth read-through, Threat, Have/Offer and Beacon rows** (Corvo, 22 November, 17:42, first run with the REM telemetry encoding): 7 of 18 correct, the others rejected or chat, no wrong code. The recognizer rarely heard "have" at the start ("aid", "is", "ave", "ape", "ace"), and three printed labels failed as read ("area unsafe avoid", "have tools equipment", which was refused as contradicting S06, and "automated distress beacon active"). Revision 8 adds the printed labels and the recorded mishearings as whole phrases only: "area unsafe avoid" (X02); "looting reported", "theft reported" and "muting reported" (X05); "aid medical supplies" (H03); "have power charging" and "power charging" (H04); "have tools equipment" and "ave tools" (H06); "ape shelter" (H07); "have transport vehicle" and "ace transport" (H08); "automated distress beacon active", "automated distress beacon" and "automated distress become active" (B01); "beacon and knowledge" (B02); "cancel because i am okay" and "cancel because i am ok" (B03). With them, all 17 transcripts give the intended code; one transmission had no recognized speech. MECP reports with telemetry were 384 bytes in the outbox (496 before) and no resource transfers were needed.
 
-Regression results: MECP 136/136, DDD 45/45, chat 49/49, RCH 7/7.
+**Poster sample** (Corvo, 22 November, 18:04, 86 m from the antenna, 11 rows): 9 correct, no wrong code. Revision 8's "area unsafe avoid" passed. Revision 9 adds "tidal surge warning", "tsunami tidal surge warning" and "storm surge warning" (W06; the printed label failed on "warning") and "urging" for urgent ("Kodiak urging gas leak"). With them, all 11 give the intended code. RCH confirmed the first reports; from 18:05:33 messages of every size got no delivery proof, as in the previous run from 17:43:47. That is on the transport or hub side and is not investigated here.
+
+Regression results when MECP revision 6 was added: MECP 136/136, DDD 45/45, chat 49/49, RCH 7/7. The set has since grown to 194 MECP, 45 DDD, 49 chat and 7 RCH cases. On MECP revision 9 (22 November 2026), `cargo run --release --locked -p kodiak-intent --example evaluate` gave generated 1,140/1,140 and regression chat 49/49, DDD 45/45, MECP 194/194 and RCH 7/7; the workspace's 106 tests passed.
 
 ## Verification (22 November 2026): multi-event MECP and DDD markers
 
-`deterministic/4` with vocabularies MECP 1.2, contact 1.2 and RCH 1.1.
+`deterministic/4` with vocabularies MECP 1.2, contact 1.2 and RCH 1.1. The case counts below are those of the dataset at that time.
 
 | Suite (`datasets/regression.v2.jsonl`) | Cases | Recorded on air | Pass |
 |---|---|---|---|
@@ -287,13 +295,13 @@ The third session also passed live: both radio checks stayed chat, and both "Kod
 
 - **The command grammar is strict.** After fuzzy correction, any word the grammar still does not recognize rejects the whole command. That is safe, but natural phrasing outside the vocabularies is not understood until a model is added. Example: "multiple casualties at the bridge" is rejected because of "at the bridge".
 - **Fuzzy matching can pick the wrong word.** It reads an unknown word as the closest-sounding vocabulary word. "deed" is read as "dead", for example; in "mayday deed water" that made the report ambiguous, so it was rejected. Check `corrections` when auditing a command.
-- **Live RF testing is limited.** One session with one radio and one speaker (above). Recognition accuracy across voices, noise levels and weak signals is not yet measured.
-- **Recognizer spellings add false-activation risk.** Treating "hostel", "codeiac" and similar spellings as Kodiak words lets an ordinary sentence trigger a command. The activation word still has to come first.
+- **Live RF testing is limited.** The sessions above, on 20–22 November 2026, used two radios (Corvo and BLACKY) and two speakers on air, most of them one male speaker on Corvo; a third, Italian-accented speaker was tested only from phone voice notes. Recognition accuracy across other voices, noise levels and weak signals is not yet measured.
+- **Recognizer spellings add false-activation risk.** Treating "hostel", "codeiac" and similar spellings as Kodiak words lets an ordinary sentence trigger a command. The activation word or one of its configured spellings counts anywhere in the transcript ("hey Kodiak, list users"). Only a misheard word that is not a configured spelling must be the first word, and then only when the rest is a recognized command.
 - **Clock directions are off by default.** They need `bss_heading_is_compass = true`, and nobody has verified whether the VR-N76 BSS heading is a compass heading.
 - **Spoken bearings are treated as true north.** No magnetic declination correction is applied.
 - **Command replies never reach the operator.** RCH replies to commands (for example the user list) go to the radio's LXMF identity, which the receive-only gateway never reads. `checklist.list.active` sends no reply at all on success. These commands change state in RCH or appear in its logs, but the operator hears nothing back.
 - **BSS IDs can be spoofed.** BSS is unauthenticated, so anyone who transmits an allowlisted radio ID can issue RCH commands as that radio's identity. RCH's `authorization_required` setting is off by default, so RCH executes every supported command. Before enabling intents on a live hub, turn on RCH capability checks for these identities, or set `[rch].send_intents = false`.
-- **Not tested against a running RCH.** The MECP log-entry and marker messages follow RCH's command handlers as read from the RCH source at commit `c2bf78a`, and RCH command names were rechecked against `main` at `0a71f4b`; no live RCH instance received them. The REM-to-RCH MECP path appears unsupported in that RCH version, so Sigil sends the full `command_type` envelope instead.
+- **Partly tested against a running RCH.** The MECP log-entry and marker messages follow RCH's command handlers as read from the RCH source at commit `c2bf78a`, and RCH command names were rechecked against `main` at `0a71f4b`. A live hub confirmed and showed chat, positions and MECP reports on 21 and 22 November 2026 (above), and one contact marker was published to it. This file records no RCH command and no multi-event MECP report reaching a live hub. The REM-to-RCH MECP path appears unsupported in that RCH version, so Sigil sends the full `command_type` envelope instead.
 - **Suspect contacts get the `unknown` symbol**, because RCH's symbol catalog has no suspect symbol.
 - **The legacy Python publisher (`send_lxmf.py`) ignores Kodiak.** It still sends every live transcript as chat, including spoken commands.
 - **Whisper base is near real time on this CPU** (about 4 s per clip). Prefer Parakeet when commands must reach RCH quickly.

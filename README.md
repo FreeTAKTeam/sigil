@@ -11,7 +11,8 @@ R3AKT Sigil receives analog narrowband FM on an RTL-SDR. It transcribes speech l
 Copy `gateway.example.toml` to `gateway.toml`. Set `[identity].allowlist` to the radios you operate, `[fabric].tcp_clients` to your Reticulum TCP interfaces, and `[rch].destination_hash` to the hub’s LXMF delivery hash. Set `[rch].enabled = true` after checking the recipient. `[identity].auto_register` permits the first registration of allowlisted radios.
 
 ```powershell
-$env:R3AKT_IDENTITY_PASSPHRASE = Read-Host 'Identity registry passphrase' -MaskInput
+$secure = Read-Host 'Identity registry passphrase' -AsSecureString
+$env:R3AKT_IDENTITY_PASSPHRASE = [System.Net.NetworkCredential]::new('', $secure).Password
 .\target\release\r3akt-sigil.exe listen --config .\gateway.toml --gain-db 0 --save-wav
 ```
 
@@ -74,7 +75,7 @@ Gain is rounded to the nearest step the tuner supports. By default the listener 
 .\target\release\r3akt-sigil.exe wav .\voice.wav --save-wav --output-dir .\wav-check
 ```
 
-WAV mode accepts PCM or float input between 8 and 192 kHz, up to five minutes. It downmixes and resamples the file for transcription. The frequency is a label in WAV mode.
+WAV mode accepts PCM or float input between 8 and 192 kHz, up to five minutes. It downmixes and resamples the file for transcription. The frequency is a label in WAV mode. Add `--config .\gateway.toml` to use that file's `[kodiak]` settings and wake words, as `listen` does.
 
 ### Use Whisper instead
 
@@ -106,7 +107,22 @@ The radio path uses the CPU-only [SDR-RS DSP crates](https://github.com/jasonher
 .\scripts\package-windows.ps1 -WhisperOnly -ModelPath .\models\ggml-base.en.bin
 ```
 
-The Windows package includes the native executable, runtime DLLs for its selected backend, configuration example, and instructions. From the extracted bundle, run `.\r3akt-sigil.exe` in place of `.\target\release\r3akt-sigil.exe`. Use `-ModelPath` to include a local Parakeet model directory or Whisper model. On Linux x64 or ARM64, install a C/C++ toolchain, CMake, Clang and libclang, then run `sh scripts/package-linux.sh`, optionally with a Parakeet model directory or Whisper model file. The Linux bundle carries the Sherpa-ONNX and ONNX Runtime shared libraries; run it with `LD_LIBRARY_PATH` set to the bundle directory if they are not found. `WHISPER_ONLY=1` builds a Whisper-only bundle. The Linux Parakeet bundle has not been tested on Linux yet. Linux requires USB access for the account running the gateway. The embedded mode runs within the executable.
+The Windows package includes the native executable, runtime DLLs for its selected backend, configuration example, and instructions. From the extracted bundle, run `.\r3akt-sigil.exe` in place of `.\target\release\r3akt-sigil.exe`. Use `-ModelPath` to include a local Parakeet model directory or Whisper model. On Linux x64 or ARM64, install a C/C++ toolchain, CMake, Clang and libclang, then run `sh scripts/package-linux.sh`, optionally with a Parakeet model directory or Whisper model file. The Linux Parakeet bundle carries the Sherpa-ONNX and ONNX Runtime shared libraries; run it with `LD_LIBRARY_PATH` set to the bundle directory if they are not found. `WHISPER_ONLY=1` builds a Whisper-only bundle. The Linux Parakeet bundle has not been tested on Linux yet. The embedded mode runs within the executable.
+
+Each script writes `dist/r3akt-sigil-<version>-<os>-<arch>-<backend>`, its `.zip` or `.tar.gz` archive, and a `.sha256` checksum file next to the archive. A bundled model keeps its own file or directory name. The executable looks for `models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8` or `models/ggml-base.en.bin` by default; pass `--model` for any other name. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists the licences of the native libraries and models.
+
+Linux requires USB access for the account running the gateway. The [librtlsdr-rs](https://github.com/jasonherald/librtlsdr-rs) 0.3.0 README gives this udev rule for dongles with the Realtek USB IDs `0bda:2838` and `0bda:2832`, and a blacklist for the kernel's DVB driver if it binds to the dongle:
+
+```text
+# /etc/udev/rules.d/20-rtlsdr.rules
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2832", MODE="0666"
+
+# /etc/modprobe.d/blacklist-dvb_usb_rtl28xxu.conf
+blacklist dvb_usb_rtl28xxu
+```
+
+Reload the rules with `sudo udevadm control --reload-rules && sudo udevadm trigger`, then unplug and replug the dongle. `MODE="0666"` gives every local account access to the dongle, not only the gateway's.
 
 ## Live acceptance
 

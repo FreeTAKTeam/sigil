@@ -15,13 +15,24 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
-use crate::result::{Correction, Intent, KodiakResult, Rejection};
+use crate::result::{Correction, Intent, KodiakResult, RejectReason, Rejection};
 use crate::wake::WakeWord;
 
 /// Sample rate every [`AudioInput`] must use.
 pub const AUDIO_SAMPLE_RATE_HZ: u32 = 16_000;
+
+/// Longest audio message accepted by default, in seconds.
+pub const DEFAULT_MAX_AUDIO_SECONDS: u32 = 300;
+
+/// Most words accepted after the activation word by default.
+pub const DEFAULT_MAX_COMMAND_WORDS: usize = 128;
+
+/// Shortest time between two attempts to load the speech model after a
+/// failed load.
+pub const ASR_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Mono PCM audio for transcription.
 #[derive(Clone, Debug)]
@@ -107,9 +118,10 @@ pub trait IntentClassifier: Send + Sync {
     /// Called only when the activation word was not found. A classifier that
     /// can judge whether the transcript still addresses Kodiak (for example
     /// with the activation word misheard) returns the command to classify.
-    /// The default never does, so transcripts without the word stay chat.
-    fn addressed(&self, transcript: &str) -> Option<Addressed> {
-        let _ = transcript;
+    /// `wake` is the engine's activation word. The default never does, so
+    /// transcripts without the word stay chat.
+    fn addressed(&self, transcript: &str, wake: &WakeWord) -> Option<Addressed> {
+        let _ = (transcript, wake);
         None
     }
 
@@ -128,6 +140,11 @@ pub struct Addressed {
     pub command: String,
     /// The word taken to be the misheard activation word, if one was removed.
     pub heard: Option<String>,
+    /// The classification of `command` when the classifier already produced
+    /// it; the engine then uses it instead of classifying again. `command`
+    /// must then have no leading activation words
+    /// ([`WakeWord::strip_leading`]).
+    pub classification: Option<Classification>,
 }
 
 /// What a classifier produced, with any word corrections it applied.
@@ -152,13 +169,69 @@ impl From<Result<Intent, Rejection>> for Classification {
     }
 }
 
-type Loader = Box<dyn FnOnce() -> Result<Box<dyn Transcriber>, KodiakError> + Send>;
+type Loader = Box<dyn Fn() -> Result<Box<dyn Transcriber>, KodiakError> + Send>;
 
-enum Asr {
-    None,
-    Pending(Loader),
+/// The speech recognizer and, when it can be (re)loaded, its loader.
+struct Asr {
+    loader: Option<Loader>,
+    state: AsrState,
+}
+
+enum AsrState {
+    /// Not loaded yet, or discarded after a transcriber panicked.
+    Unloaded,
     Loaded(Box<dyn Transcriber>),
-    Failed(String),
+    /// Loading failed at `at`; retried after [`ASR_RETRY_INTERVAL`].
+    Failed {
+        message: String,
+        at: Instant,
+    },
+}
+
+impl Asr {
+    /// Loads the model when none is loaded and a load is due.
+    fn load_if_due(&mut self) {
+        let Some(loader) = self.loader.as_ref() else {
+            return;
+        };
+        let due = match &self.state {
+            AsrState::Unloaded => true,
+            AsrState::Failed { at, .. } => at.elapsed() >= ASR_RETRY_INTERVAL,
+            AsrState::Loaded(_) => false,
+        };
+        if !due {
+            return;
+        }
+        // Stays in place if the loader panics, so that is retried later too.
+        self.state = AsrState::Failed {
+            message: "loading the speech model panicked".into(),
+            at: Instant::now(),
+        };
+        self.state = match loader() {
+            Ok(transcriber) => AsrState::Loaded(transcriber),
+            Err(error) => AsrState::Failed {
+                message: error.to_string(),
+                at: Instant::now(),
+            },
+        };
+    }
+
+    /// After a transcriber panicked: discards it, so that the model is
+    /// reloaded, or reports it unavailable when there is no loader.
+    fn discard_transcriber(&mut self) {
+        if !matches!(self.state, AsrState::Loaded(_)) {
+            return;
+        }
+        let next = if self.loader.is_some() {
+            AsrState::Unloaded
+        } else {
+            AsrState::Failed {
+                message: "the speech recognizer panicked and cannot be reloaded".into(),
+                at: Instant::now(),
+            }
+        };
+        drop(std::mem::replace(&mut self.state, next));
+    }
 }
 
 /// The Kodiak engine.
@@ -166,6 +239,8 @@ pub struct Engine {
     wake: WakeWord,
     classifier: Box<dyn IntentClassifier>,
     asr: Mutex<Asr>,
+    max_audio_seconds: u32,
+    max_command_words: usize,
 }
 
 impl Engine {
@@ -176,8 +251,33 @@ impl Engine {
         Self {
             wake: WakeWord::default(),
             classifier: Box::new(classifier),
-            asr: Mutex::new(Asr::None),
+            asr: Mutex::new(Asr {
+                loader: None,
+                state: AsrState::Unloaded,
+            }),
+            max_audio_seconds: DEFAULT_MAX_AUDIO_SECONDS,
+            max_command_words: DEFAULT_MAX_COMMAND_WORDS,
         }
+    }
+
+    /// Longest audio message accepted, in seconds
+    /// ([`DEFAULT_MAX_AUDIO_SECONDS`] by default). Longer audio is
+    /// [`KodiakError::InvalidAudio`].
+    #[must_use]
+    pub fn with_max_audio_seconds(mut self, seconds: u32) -> Self {
+        self.max_audio_seconds = seconds;
+        self
+    }
+
+    /// Most whitespace-separated words accepted after the activation word
+    /// ([`DEFAULT_MAX_COMMAND_WORDS`] by default). A longer command is
+    /// rejected as [`RejectReason::InvalidParameter`] without being
+    /// classified, and a transcript without the activation word that is
+    /// longer than this plus one word stays chat without being judged.
+    #[must_use]
+    pub fn with_max_command_words(mut self, words: usize) -> Self {
+        self.max_command_words = words;
+        self
     }
 
     /// Replaces the activation word.
@@ -190,18 +290,26 @@ impl Engine {
     /// Attaches a loaded transcriber.
     #[must_use]
     pub fn with_transcriber(self, transcriber: Box<dyn Transcriber>) -> Self {
-        self.with_asr(Asr::Loaded(transcriber))
+        self.with_asr(Asr {
+            loader: None,
+            state: AsrState::Loaded(transcriber),
+        })
     }
 
     /// Attaches a transcriber that is loaded on the first audio message, so
-    /// text-only use never pays for model loading. A failed load is reported
-    /// for every later audio message and is not retried.
+    /// text-only use never pays for model loading. The loader is kept: a
+    /// failed load is retried on a later audio message, at most once per
+    /// [`ASR_RETRY_INTERVAL`] (in between, the failure is reported), and the
+    /// model is reloaded on the audio message after a transcriber panicked.
     #[must_use]
     pub fn with_transcriber_loader(
         self,
-        loader: impl FnOnce() -> Result<Box<dyn Transcriber>, KodiakError> + Send + 'static,
+        loader: impl Fn() -> Result<Box<dyn Transcriber>, KodiakError> + Send + 'static,
     ) -> Self {
-        self.with_asr(Asr::Pending(Box::new(loader)))
+        self.with_asr(Asr {
+            loader: Some(Box::new(loader)),
+            state: AsrState::Unloaded,
+        })
     }
 
     fn with_asr(self, asr: Asr) -> Self {
@@ -211,22 +319,43 @@ impl Engine {
         }
     }
 
-    /// Whether a speech model is loaded.
+    /// Whether a speech model is loaded and usable. False after a
+    /// transcriber panicked, until the next audio message reloads it.
     #[must_use]
     pub fn transcriber_loaded(&self) -> bool {
         self.asr
             .lock()
-            .is_ok_and(|asr| matches!(*asr, Asr::Loaded(_)))
+            .is_ok_and(|asr| matches!(asr.state, AsrState::Loaded(_)))
+    }
+
+    /// The recognizer lock. When a transcriber panicked while holding it, its
+    /// possibly corrupt state is discarded and the lock is usable again.
+    fn recognizer(&self) -> MutexGuard<'_, Asr> {
+        self.asr.lock().unwrap_or_else(|poisoned| {
+            let mut asr = poisoned.into_inner();
+            asr.discard_transcriber();
+            self.asr.clear_poison();
+            asr
+        })
     }
 
     /// Steps 3–6: classify text that is already transcribed.
     #[must_use]
     pub fn process_text(&self, input: &TextInput) -> KodiakResult {
         let transcript = input.text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let (command, heard) = match self.wake.command(&transcript) {
-            Some(command) => (command.to_owned(), None),
-            None => match self.classifier.addressed(&transcript) {
-                Some(Addressed { command, heard }) => (command, heard),
+        let (command, heard, precomputed) = match self.wake.command(&transcript) {
+            Some(command) => (command.to_owned(), None, None),
+            None if transcript.split(' ').count() > self.max_command_words.saturating_add(1) => {
+                return KodiakResult::Chat {
+                    content: transcript,
+                };
+            }
+            None => match self.classifier.addressed(&transcript, &self.wake) {
+                Some(Addressed {
+                    command,
+                    heard,
+                    classification,
+                }) => (command, heard, classification),
                 None => {
                     return KodiakResult::Chat {
                         content: transcript,
@@ -234,13 +363,32 @@ impl Engine {
                 }
             },
         };
+        let command = self.wake.strip_leading(&command);
         let classifier = self.classifier.id().to_owned();
         let vocabularies = self.classifier.vocabularies();
+        let words = command.split_whitespace().count();
+        if words > self.max_command_words {
+            return KodiakResult::Rejected {
+                rejection: Rejection::new(
+                    RejectReason::InvalidParameter,
+                    None,
+                    format!(
+                        "the command has {words} words; at most {} are accepted",
+                        self.max_command_words
+                    ),
+                ),
+                transcript,
+                classifier,
+                corrections: Vec::new(),
+                confidence: None,
+                vocabularies,
+            };
+        }
         let Classification {
             result,
             mut corrections,
             confidence,
-        } = self.classifier.classify(&command);
+        } = precomputed.unwrap_or_else(|| self.classifier.classify(command));
         if let Some(heard) = heard {
             corrections.insert(
                 0,
@@ -274,9 +422,12 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Fails when the audio is not 16 kHz, when no recognizer is available, or
-    /// when recognition fails. Recognition runs while holding the engine's
-    /// recognizer lock, so concurrent callers are serialized.
+    /// Fails when the audio is not 16 kHz or longer than the maximum, when no
+    /// recognizer is available, or when recognition fails. Recognition runs
+    /// while holding the engine's recognizer lock, so concurrent callers are
+    /// serialized. A panic in the transcriber propagates to the caller; the
+    /// next call discards that transcriber and reloads the model when a
+    /// loader is attached.
     pub fn process_audio(&self, input: &AudioInput) -> Result<KodiakResult, KodiakError> {
         if input.sample_rate_hz != AUDIO_SAMPLE_RATE_HZ {
             return Err(KodiakError::InvalidAudio(format!(
@@ -284,27 +435,29 @@ impl Engine {
                 input.sample_rate_hz
             )));
         }
+        let samples = u64::try_from(input.samples.len()).unwrap_or(u64::MAX);
+        let rate = u64::from(AUDIO_SAMPLE_RATE_HZ);
+        if samples > u64::from(self.max_audio_seconds) * rate {
+            let tenths = samples.saturating_mul(10) / rate;
+            return Err(KodiakError::InvalidAudio(format!(
+                "audio is {}.{} s long; the maximum is {} s",
+                tenths / 10,
+                tenths % 10,
+                self.max_audio_seconds
+            )));
+        }
         if input.samples.iter().any(|sample| !sample.is_finite()) {
             return Err(KodiakError::InvalidAudio("non-finite sample".into()));
         }
         let text = {
-            let mut asr = self
-                .asr
-                .lock()
-                .map_err(|_| KodiakError::AsrUnavailable("recognizer lock poisoned".into()))?;
-            if matches!(*asr, Asr::Pending(_)) {
-                let Asr::Pending(loader) = std::mem::replace(&mut *asr, Asr::None) else {
-                    unreachable!("checked above");
-                };
-                *asr = match loader() {
-                    Ok(transcriber) => Asr::Loaded(transcriber),
-                    Err(error) => Asr::Failed(error.to_string()),
-                };
-            }
-            match &mut *asr {
-                Asr::Loaded(transcriber) => transcriber.transcribe(&input.samples)?,
-                Asr::Failed(message) => return Err(KodiakError::AsrUnavailable(message.clone())),
-                Asr::None | Asr::Pending(_) => {
+            let mut asr = self.recognizer();
+            asr.load_if_due();
+            match &mut asr.state {
+                AsrState::Loaded(transcriber) => transcriber.transcribe(&input.samples)?,
+                AsrState::Failed { message, .. } => {
+                    return Err(KodiakError::AsrUnavailable(message.clone()));
+                }
+                AsrState::Unloaded => {
                     return Err(KodiakError::AsrUnavailable(
                         "no recognizer configured".into(),
                     ));
@@ -355,12 +508,207 @@ mod tests {
             Echo.classify(command)
         }
 
-        fn addressed(&self, transcript: &str) -> Option<Addressed> {
+        fn addressed(&self, transcript: &str, _: &WakeWord) -> Option<Addressed> {
             let rest = transcript.strip_prefix("Kardiac")?;
             Some(Addressed {
                 command: rest.to_owned(),
                 heard: Some("Kardiac".into()),
+                classification: None,
             })
+        }
+    }
+
+    /// Counts classifications; "Kardiac" addresses it with a ready result.
+    struct Counting(Arc<AtomicUsize>);
+
+    impl IntentClassifier for Counting {
+        fn id(&self) -> &'static str {
+            "counting/1"
+        }
+
+        fn classify(&self, command: &str) -> Classification {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Echo.classify(command)
+        }
+
+        fn addressed(&self, transcript: &str, _: &WakeWord) -> Option<Addressed> {
+            let command = transcript.strip_prefix("Kardiac")?.to_owned();
+            let classification = Some(self.classify(&command));
+            Some(Addressed {
+                command,
+                heard: Some("Kardiac".into()),
+                classification,
+            })
+        }
+    }
+
+    /// Records every command it classifies.
+    struct Recorder(Arc<Mutex<Vec<String>>>);
+
+    impl IntentClassifier for Recorder {
+        fn id(&self) -> &'static str {
+            "recorder/1"
+        }
+
+        fn classify(&self, command: &str) -> Classification {
+            self.0.lock().unwrap().push(command.to_owned());
+            Echo.classify(command)
+        }
+    }
+
+    #[test]
+    fn repeated_activation_words_are_not_part_of_the_command() {
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::new(Recorder(Arc::clone(&recorder)))
+            .with_wake_word(WakeWord::with_forms(["falcon", "falkon"]));
+        let _ = engine.process_text(&TextInput::new("Falcon, falkon FALCON list users"));
+        let _ = engine.process_text(&TextInput::new("falcon kodiak list users"));
+        assert_eq!(
+            *recorder.lock().unwrap(),
+            vec![" list users".to_owned(), " kodiak list users".to_owned()]
+        );
+    }
+
+    #[test]
+    fn overlong_commands_are_rejected_unclassified() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = Engine::new(Counting(Arc::clone(&calls))).with_max_command_words(3);
+        assert!(matches!(
+            engine.process_text(&TextInput::new("Kodiak Kodiak list the users")),
+            KodiakResult::Intent { .. }
+        ));
+        let KodiakResult::Rejected { rejection, .. } =
+            engine.process_text(&TextInput::new("Kodiak list all the users"))
+        else {
+            panic!("expected rejection");
+        };
+        assert_eq!(rejection.reason, RejectReason::InvalidParameter);
+        assert_eq!(
+            rejection.detail,
+            "the command has 4 words; at most 3 are accepted"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Without the activation word: chat, never judged when too long.
+        assert!(matches!(
+            engine.process_text(&TextInput::new("Kardiac list all the users")),
+            KodiakResult::Chat { .. }
+        ));
+        assert!(matches!(
+            engine.process_text(&TextInput::new("we need lots more food here")),
+            KodiakResult::Chat { .. }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            engine.process_text(&TextInput::new("Kardiac list the users")),
+            KodiakResult::Intent { .. }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(DEFAULT_MAX_COMMAND_WORDS, 128);
+    }
+
+    #[test]
+    fn overlong_audio_is_invalid() {
+        let engine = Engine::new(Echo)
+            .with_transcriber(Box::new(Fixed("Kodiak list users")))
+            .with_max_audio_seconds(1);
+        assert!(
+            engine
+                .process_audio(&AudioInput::mono_16k(vec![0.0; 16_000]))
+                .is_ok()
+        );
+        let Err(KodiakError::InvalidAudio(message)) =
+            engine.process_audio(&AudioInput::mono_16k(vec![0.0; 24_000]))
+        else {
+            panic!("expected invalid audio");
+        };
+        assert_eq!(message, "audio is 1.5 s long; the maximum is 1 s");
+        assert_eq!(DEFAULT_MAX_AUDIO_SECONDS, 300);
+    }
+
+    /// Moves a failed load back by the retry interval.
+    fn age_failure(engine: &Engine) {
+        let mut asr = engine.asr.lock().unwrap();
+        let AsrState::Failed { at, .. } = &mut asr.state else {
+            panic!("expected a failed load");
+        };
+        *at = Instant::now().checked_sub(ASR_RETRY_INTERVAL).unwrap();
+    }
+
+    #[test]
+    fn a_failed_load_is_retried_after_the_interval() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&loads);
+        let engine = Engine::new(Echo).with_transcriber_loader(move || {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(KodiakError::AsrUnavailable("model missing".into()))
+            } else {
+                Ok(Box::new(Fixed("Kodiak list users")) as Box<dyn Transcriber>)
+            }
+        });
+        let audio = AudioInput::mono_16k(vec![0.0; 160]);
+        for _ in 0..2 {
+            let Err(KodiakError::AsrUnavailable(message)) = engine.process_audio(&audio) else {
+                panic!("expected unavailable");
+            };
+            assert!(message.contains("model missing"), "{message}");
+        }
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            1,
+            "not retried within the interval"
+        );
+        age_failure(&engine);
+        assert!(matches!(
+            engine.process_audio(&audio),
+            Ok(KodiakResult::Intent { .. })
+        ));
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+        assert!(engine.transcriber_loaded());
+    }
+
+    struct Panics;
+
+    impl Transcriber for Panics {
+        fn transcribe(&mut self, _: &[f32]) -> Result<String, KodiakError> {
+            panic!("recognizer crashed");
+        }
+    }
+
+    #[test]
+    fn a_panicked_transcriber_is_reloaded_on_the_next_call() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&loads);
+        let engine = Engine::new(Echo).with_transcriber_loader(move || {
+            Ok(if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                Box::new(Panics) as Box<dyn Transcriber>
+            } else {
+                Box::new(Fixed("Kodiak list users"))
+            })
+        });
+        let audio = AudioInput::mono_16k(vec![0.0; 160]);
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.process_audio(&audio)
+        }));
+        assert!(crashed.is_err(), "the panic reaches the caller");
+        assert!(!engine.transcriber_loaded());
+        assert!(matches!(
+            engine.process_audio(&audio),
+            Ok(KodiakResult::Intent { .. })
+        ));
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+        assert!(engine.transcriber_loaded());
+
+        // Without a loader there is nothing to reload.
+        let engine = Engine::new(Echo).with_transcriber(Box::new(Panics));
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.process_audio(&audio)
+        }));
+        assert!(crashed.is_err());
+        for _ in 0..2 {
+            assert!(matches!(
+                engine.process_audio(&audio),
+                Err(KodiakError::AsrUnavailable(_))
+            ));
         }
     }
 

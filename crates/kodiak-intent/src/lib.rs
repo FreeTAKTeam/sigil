@@ -36,6 +36,7 @@ use std::collections::BTreeSet;
 
 use kodiak_core::{
     Addressed, Category, Classification, Intent, IntentClassifier, RejectReason, Rejection,
+    WakeWord,
 };
 
 pub use text::tokenize;
@@ -157,9 +158,6 @@ impl DeterministicClassifier {
     }
 }
 
-/// The activation word a misheard first word is compared with.
-const WAKE: &str = "kodiak";
-
 /// Largest sound-aware distance, in half edits, at which a first word still
 /// counts as the activation word: three edits, where letters that sound
 /// alike over radio (c/k, a/o, …) cost half an edit. Words shorter than four
@@ -167,14 +165,15 @@ const WAKE: &str = "kodiak";
 const WAKE_DISTANCE: u32 = 6;
 
 /// When the first word of `transcript` sounds like the activation word
-/// (at most three edits from "kodiak", counting sound-alike letters as half
-/// an edit, and four letters or more), returns that word as heard and the
-/// command after it. "Cardiac" qualifies: c/k and a/o sound alike.
+/// (at most three edits from `wake.word()`, counting sound-alike letters as
+/// half an edit, and four letters or more), returns that word as heard and
+/// the command after it. With the default word "Cardiac" qualifies: c/k and
+/// a/o sound alike.
 ///
 /// This only finds a candidate: callers must still require the command to be
 /// recognized before treating the transcript as addressed to Kodiak.
 #[must_use]
-pub fn first_word_wake(transcript: &str) -> Option<(String, String)> {
+pub fn first_word_wake(transcript: &str, wake: &WakeWord) -> Option<(String, String)> {
     let start = transcript.find(char::is_alphanumeric)?;
     let rest = &transcript[start..];
     let end = rest
@@ -182,7 +181,7 @@ pub fn first_word_wake(transcript: &str) -> Option<(String, String)> {
         .unwrap_or(rest.len());
     let heard = &rest[..end];
     let bare = heard.to_lowercase();
-    (bare.chars().count() >= 4 && fuzzy::distance(&bare, WAKE) <= WAKE_DISTANCE)
+    (bare.chars().count() >= 4 && fuzzy::distance(&bare, wake.word()) <= WAKE_DISTANCE)
         .then(|| (heard.to_owned(), rest[end..].to_owned()))
 }
 
@@ -241,12 +240,7 @@ impl IntentClassifier for DeterministicClassifier {
     }
 
     fn classify(&self, command: &str) -> Classification {
-        // A repeated activation word ("Kodiak Kodiak routine …") is not
-        // part of the command.
-        let mut tokens = tokenize(command);
-        let repeats = tokens.iter().take_while(|t| t.word == WAKE).count();
-        tokens.drain(..repeats);
-        let tokens = self.mecp.join_severities(&tokens);
+        let tokens = self.mecp.join_severities(&tokenize(command));
         let (tokens, mut corrections) = self.corrector.drop_false_starts(&tokens);
         let words: Vec<&str> = tokens.iter().map(|t| t.word.as_str()).collect();
         let verbatim = self.mecp.verbatim(&words);
@@ -262,24 +256,108 @@ impl IntentClassifier for DeterministicClassifier {
 
     /// A misheard activation word as the first word, when the rest is a
     /// recognized command.
-    fn addressed(&self, transcript: &str) -> Option<Addressed> {
-        let (heard, command) = first_word_wake(transcript)?;
-        self.classify(&command).result.ok()?;
+    fn addressed(&self, transcript: &str, wake: &WakeWord) -> Option<Addressed> {
+        let (heard, command) = first_word_wake(transcript, wake)?;
+        let command = wake.strip_leading(&command).to_owned();
+        let classification = self.classify(&command);
+        classification.result.as_ref().ok()?;
         Some(Addressed {
             command,
             heard: Some(heard),
+            classification: Some(classification),
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use kodiak_core::{Affiliation, ContactReport, Direction, MecpParameters, MecpReport};
+    use kodiak_core::{
+        Affiliation, ContactReport, Correction, Direction, Engine, KodiakResult, MecpParameters,
+        MecpReport, TextInput,
+    };
 
     use super::*;
 
     fn classify(text: &str) -> Result<Intent, Rejection> {
         DeterministicClassifier::new().classify(text).result
+    }
+
+    /// What the engine makes of `text`: an MECP content, a rejection
+    /// reason, another intent's name or "chat".
+    fn engine_mecp(engine: &Engine, text: &str) -> String {
+        match engine.process_text(&TextInput::new(text)) {
+            KodiakResult::Intent {
+                intent: Intent::MecpReport(report),
+                ..
+            } => report.content,
+            KodiakResult::Intent { intent, .. } => intent.name().to_owned(),
+            KodiakResult::Rejected { rejection, .. } => format!("{:?}", rejection.reason),
+            KodiakResult::Chat { .. } => "chat".into(),
+        }
+    }
+
+    #[test]
+    fn a_configured_wake_word_replaces_kodiak() {
+        let engine = Engine::new(DeterministicClassifier::new())
+            .with_wake_word(WakeWord::with_forms(["falcon"]));
+        // Exact word, anywhere.
+        assert_eq!(
+            engine_mecp(&engine, "Falcon, urgent need food."),
+            "MECP/1/S02"
+        );
+        assert_eq!(
+            engine_mecp(&engine, "hey falcon list users"),
+            "mission.users"
+        );
+        // Repeated.
+        assert_eq!(
+            engine_mecp(&engine, "Falcon falcon routine heading home"),
+            "MECP/3/L14"
+        );
+        // Misheard first word, within the sound-aware distance.
+        let KodiakResult::Intent { corrections, .. } =
+            engine.process_text(&TextInput::new("Valcon urgent need food."))
+        else {
+            panic!("expected intent");
+        };
+        assert_eq!(
+            corrections[0],
+            Correction {
+                heard: "Valcon".into(),
+                read_as: "falcon".into()
+            }
+        );
+        // "kodiak" is not special any more.
+        for chat in [
+            "Kodiak urgent need food.",
+            "Kardiac urgent need food.",
+            "Cardiac, May Day Severe Bleeding.",
+        ] {
+            assert_eq!(engine_mecp(&engine, chat), "chat", "{chat}");
+        }
+        assert_ne!(
+            engine_mecp(&engine, "Falcon kodiak routine heading home"),
+            "MECP/3/L14"
+        );
+        let falcon = WakeWord::with_forms(["falcon"]);
+        assert_eq!(
+            first_word_wake("Falkon list users", &falcon),
+            Some(("Falkon".into(), " list users".into()))
+        );
+        assert_eq!(first_word_wake("Kodiak list users", &falcon), None);
+        assert_eq!(first_word_wake("Fal list users", &falcon), None);
+    }
+
+    #[test]
+    fn every_default_spelling_is_dropped_when_repeated() {
+        let engine = Engine::new(DeterministicClassifier::new());
+        for text in [
+            "Kodiak kodiac routine heading home",
+            "Kodiak, Codiak. routine heading home",
+            "codeiac kodiak routine heading home",
+        ] {
+            assert_eq!(engine_mecp(&engine, text), "MECP/3/L14", "{text}");
+        }
     }
 
     fn mecp(text: &str) -> String {
@@ -565,7 +643,7 @@ mod tests {
     #[test]
     fn vocabulary_versions_are_recorded() {
         let versions = DeterministicClassifier::new().vocabularies();
-        assert_eq!(versions["mecp"], "1.8");
+        assert_eq!(versions["mecp"], "1.9");
         assert_eq!(versions["contact"], "1.3");
         assert_eq!(versions["rch"], "1.1");
     }
@@ -578,21 +656,24 @@ mod tests {
     #[test]
     fn a_misheard_first_word_activates_only_before_a_command() {
         let rules = DeterministicClassifier::new();
-        let addressed = rules.addressed("Kardiac urgent need food.").unwrap();
+        let wake = WakeWord::default();
+        let addressed = rules.addressed("Kardiac urgent need food.", &wake).unwrap();
         assert_eq!(addressed.heard.as_deref(), Some("Kardiac"));
         assert_eq!(addressed.command, " urgent need food.");
-        let addressed = rules.addressed("Podax, mayday, meet water.").unwrap();
+        let addressed = rules
+            .addressed("Podax, mayday, meet water.", &wake)
+            .unwrap();
         assert_eq!(addressed.heard.as_deref(), Some("Podax"));
         // Heard on air on 22 November 2026; c/k and a/o sound alike.
         let addressed = rules
-            .addressed("Cardiac, May Day Severe Bleeding.")
+            .addressed("Cardiac, May Day Severe Bleeding.", &wake)
             .unwrap();
         assert_eq!(addressed.heard.as_deref(), Some("Cardiac"));
-        let addressed = rules.addressed("Kodiaks mayday meet water").unwrap();
+        let addressed = rules.addressed("Kodiaks mayday meet water", &wake).unwrap();
         assert_eq!(addressed.heard.as_deref(), Some("Kodiaks"));
         // "Kodiaks" before an incomplete command stays chat.
-        assert_eq!(rules.addressed("Kodiaks hostile 300 meters"), None);
-        assert_eq!(rules.addressed("The Kodiaks need water"), None);
+        assert_eq!(rules.addressed("Kodiaks hostile 300 meters", &wake), None);
+        assert_eq!(rules.addressed("The Kodiaks need water", &wake), None);
         for chat in [
             "I think we need water.",
             "Cardiac arrest is a medical term",
@@ -600,16 +681,23 @@ mod tests {
             "Codeac, are you there?",
             "God yeah. May they need water.",
         ] {
-            assert_eq!(rules.addressed(chat), None, "{chat}");
+            assert_eq!(rules.addressed(chat, &wake), None, "{chat}");
         }
     }
 
     /// Rules added after the 22 November 2026 voice samples.
     #[test]
     fn live_voice_sample_fixes() {
-        // A repeated activation word is dropped.
-        assert_eq!(mecp("kodiak routine heading home"), "MECP/3/L14");
-        assert_eq!(mecp("kodiak kodiak routine heading home"), "MECP/3/L14");
+        // A repeated activation word is dropped (by the engine).
+        let engine = Engine::new(DeterministicClassifier::new());
+        assert_eq!(
+            engine_mecp(&engine, "kodiak routine heading home"),
+            "MECP/3/L14"
+        );
+        assert_eq!(
+            engine_mecp(&engine, "kodiak kodiak routine heading home"),
+            "MECP/3/L14"
+        );
         // A plural unit after "one": a number word was most likely dropped.
         assert_eq!(
             reason("friendly one meters twelve o'clock"),

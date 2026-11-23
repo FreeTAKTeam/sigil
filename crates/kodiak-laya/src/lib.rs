@@ -34,11 +34,10 @@ mod questions;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Mutex;
 
 use kodiak_core::{
     Addressed, Category, Classification, Intent, IntentClassifier, MecpReport, RchCommand,
-    RejectReason, Rejection,
+    RejectReason, Rejection, WakeWord,
 };
 use kodiak_intent::vocabulary::{MECP_V1, Mecp, RCH_V1, Rch};
 use kodiak_intent::{DeterministicClassifier, first_word_wake};
@@ -246,8 +245,6 @@ pub struct LayaClassifier<O: Oracle = LayaOracle> {
     baseline: DeterministicClassifier,
     /// Every word the MECP and hub vocabularies know.
     known: BTreeSet<String>,
-    /// The classification of the command last judged by `addressed`.
-    cache: Mutex<Option<(String, Classification)>>,
 }
 
 impl LayaClassifier<LayaOracle> {
@@ -294,7 +291,6 @@ impl<O: Oracle> LayaClassifier<O> {
             rch,
             baseline: DeterministicClassifier::new(),
             known,
-            cache: Mutex::new(None),
         }
     }
 
@@ -313,31 +309,39 @@ impl<O: Oracle> LayaClassifier<O> {
             .map(|(label, p, _)| (label, p)))
     }
 
-    /// Step 3b: is the first word a severity? Probabilities of spoken forms
-    /// of the same level are summed ("mayday" and "may").
+    /// Step 3b: is the first word a severity? Within one question, the
+    /// probabilities of spoken forms of the same level are summed ("mayday"
+    /// and "may"). When the spoken forms are asked in several chunks, the
+    /// best level across chunks wins, as for chunked event questions.
     fn severity(&self, word: &str) -> Result<Option<SeverityRead>, String> {
         let replies = self
             .oracle
             .ask(&json!({ WORD: word }), &self.questions.severity())?;
-        let Some(reply) = replies.first() else {
+        if replies.is_empty() {
             return Err("laya returned no severity".into());
-        };
-        let mut levels: BTreeMap<u8, (f32, f32, usize)> = BTreeMap::new();
-        for (label, p) in &reply.probabilities {
-            if let Some(spoken) = self.questions.severity_word(label) {
-                let entry = levels.entry(spoken.level).or_insert((0.0, 0.0, 1));
-                entry.0 += p;
-                if *p > entry.1 {
-                    entry.1 = *p;
-                    entry.2 = spoken.words;
+        }
+        let mut best: Option<(u8, f32, usize, &Reply)> = None;
+        for reply in &replies {
+            let mut levels: BTreeMap<u8, (f32, f32, usize)> = BTreeMap::new();
+            for (label, p) in &reply.probabilities {
+                if let Some(spoken) = self.questions.severity_word(label) {
+                    let entry = levels.entry(spoken.level).or_insert((0.0, 0.0, 1));
+                    entry.0 += p;
+                    if *p > entry.1 {
+                        entry.1 = *p;
+                        entry.2 = spoken.words;
+                    }
+                }
+            }
+            for (level, (p, _, words)) in levels {
+                if best.is_none_or(|(_, top, _, _)| p > top) {
+                    best = Some((level, p, words, reply));
                 }
             }
         }
-        Ok(levels
-            .into_iter()
-            .max_by(|a, b| a.1.0.total_cmp(&b.1.0))
-            .filter(|(_, (p, _, _))| self.sure(reply, *p))
-            .map(|(level, (p, _, words))| SeverityRead { level, p, words }))
+        Ok(best
+            .filter(|(_, p, _, reply)| self.sure(reply, *p))
+            .map(|(level, p, words, _)| SeverityRead { level, p, words }))
     }
 
     /// The flow of step 3 with laya picking the labels.
@@ -580,31 +584,23 @@ impl<O: Oracle> IntentClassifier for LayaClassifier<O> {
     }
 
     fn classify(&self, command: &str) -> Classification {
-        if let Ok(mut cache) = self.cache.lock()
-            && let Some((cached, classification)) = cache.take()
-            && cached == command
-        {
-            return classification;
-        }
         self.decide(command)
     }
 
     /// Steps 1 and 2. The engine has already looked for the exact activation
     /// word anywhere in the transcript; this accepts a misheard one as the
     /// first word, but only when the rest is a recognized command, so
-    /// ordinary conversation stays chat.
-    fn addressed(&self, transcript: &str) -> Option<Addressed> {
-        let (heard, command) = first_word_wake(transcript)?;
+    /// ordinary conversation stays chat. The engine reuses the
+    /// classification made here.
+    fn addressed(&self, transcript: &str, wake: &WakeWord) -> Option<Addressed> {
+        let (heard, command) = first_word_wake(transcript, wake)?;
+        let command = wake.strip_leading(&command).to_owned();
         let classification = self.decide(&command);
-        if classification.result.is_err() {
-            return None;
-        }
-        if let Ok(mut cache) = self.cache.lock() {
-            *cache = Some((command.clone(), classification));
-        }
+        classification.result.as_ref().ok()?;
         Some(Addressed {
             command,
             heard: Some(heard),
+            classification: Some(classification),
         })
     }
 }

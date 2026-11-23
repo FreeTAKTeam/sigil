@@ -57,6 +57,34 @@ impl WakeWord {
         &self.forms[0]
     }
 
+    /// Whether `word` is one of the configured spellings, ignoring case.
+    #[must_use]
+    pub fn is_form(&self, word: &str) -> bool {
+        self.forms.contains(&word.to_lowercase())
+    }
+
+    /// Removes activation words (any configured spelling) that start `text`,
+    /// so a repeated activation word ("Kodiak Kodiak routine …") is not part
+    /// of the command. Returns the text after the last one removed, or `text`
+    /// unchanged when it does not start with one.
+    #[must_use]
+    pub fn strip_leading<'a>(&self, text: &'a str) -> &'a str {
+        let mut rest = text;
+        loop {
+            let Some(start) = rest.find(char::is_alphanumeric) else {
+                return rest;
+            };
+            let word = &rest[start..];
+            let end = word
+                .find(|c: char| !c.is_alphanumeric())
+                .unwrap_or(word.len());
+            if !self.is_form(&word[..end]) {
+                return rest;
+            }
+            rest = &word[end..];
+        }
+    }
+
     /// Returns the text that follows the first activation word, or `None` when
     /// the activation word is absent. The returned command may be empty.
     #[must_use]
@@ -70,7 +98,7 @@ impl WakeWord {
                 (None, true) => start = Some(index),
                 (Some(from), false) => {
                     let word = &text[from..index];
-                    if self.forms.iter().any(|form| word.to_lowercase() == *form) {
+                    if self.is_form(word) {
                         return Some(&text[index..]);
                     }
                     start = None;
@@ -106,5 +134,33 @@ mod tests {
         }
         let custom = WakeWord::with_forms(["Kodiak", "Kodiac", " "]);
         assert_eq!(custom.command("Kodiac list users"), Some(" list users"));
+    }
+
+    #[test]
+    fn leading_repeats_of_any_form_are_stripped() {
+        let wake = WakeWord::default();
+        assert_eq!(
+            wake.strip_leading(" Kodiak Routine Heading Home"),
+            " Routine Heading Home"
+        );
+        assert_eq!(
+            wake.strip_leading(", kodiac, KODIAK. list users"),
+            ". list users"
+        );
+        for unchanged in [
+            " urgent need food.",
+            "list kodiak users",
+            "kodiak2 list",
+            "",
+        ] {
+            assert_eq!(wake.strip_leading(unchanged), unchanged, "{unchanged}");
+        }
+        assert_eq!(wake.strip_leading("kodiak"), "");
+        let falcon = WakeWord::with_forms(["falcon"]);
+        assert_eq!(falcon.strip_leading(" Falcon list users"), " list users");
+        assert_eq!(
+            falcon.strip_leading(" kodiak list users"),
+            " kodiak list users"
+        );
     }
 }

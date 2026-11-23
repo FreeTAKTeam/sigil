@@ -4,11 +4,11 @@ This guide explains how the code works, for people changing it. For installing a
 
 ## What the program does
 
-`r3akt-sigil` is a Rust binary (edition 2024, toolchain 1.96.0, `unsafe_code = "forbid"`). Its workspace also holds the three packages of the R3AKT Kodiak voice-command engine under `crates/`, which will later move to their own repository ([docs/kodiak.md](kodiak.md), [KODIAK_EXTRACTION.md](../KODIAK_EXTRACTION.md)). Sigil:
+`r3akt-sigil` is a Rust binary (edition 2024, toolchain 1.96.0, `unsafe_code = "forbid"`). Its workspace also holds the four packages of the R3AKT Kodiak voice-command engine under `crates/`, which will later move to their own repository ([docs/kodiak.md](kodiak.md), [KODIAK_EXTRACTION.md](../KODIAK_EXTRACTION.md)). Sigil:
 
 1. Tunes a USB RTL-SDR to one analog narrowband FM channel. The default is 435.9950 MHz.
 2. Demodulates FM and splits the discriminator output into two paths: speech-band voice audio and unfiltered audio for the data modem.
-3. Cuts voice into clips by squelch and passes each clip to Kodiak. Kodiak transcribes it offline with whisper.cpp or, optionally, NVIDIA Parakeet TDT v2 through Sherpa-ONNX, then returns chat, a voice-command intent or a rejection.
+3. Cuts voice into clips by squelch and passes each clip to Kodiak. Kodiak transcribes it offline with NVIDIA Parakeet TDT v2 through Sherpa-ONNX (the default) or whisper.cpp, then returns chat, a voice-command intent or a rejection.
 4. Decodes BSS packets (Bell 202 AFSK, HDLC, CRC-16/X.25) that radios such as the VR-N76 send on PTT release. The packets carry a sender ID and, optionally, a GPS position.
 5. Attributes each transcript to the radio whose BSS ID trails it. It writes every result as an atomic JSON event on disk.
 6. Optionally publishes the events to a Reticulum Community Hub (RCH) over LXMF: chat, positions, MECP reports, contact markers and RCH commands. Each allowlisted radio gets its own persistent, encrypted Reticulum identity.
@@ -29,17 +29,20 @@ This guide explains how the code works, for people changing it. For installing a
 | `src/replay.rs` | `gateway-wav`: replays a discriminator capture through the full pipeline |
 | `src/config.rs` | `gateway.toml` schema and validation |
 | `src/identity.rs` | Encrypted per-radio Reticulum identity registry |
+| `src/radios.rs` | `radios` subcommand: list, add, import and remove registry entries |
 | `src/publisher.rs` | Embedded LXMF publisher with a persistent delivery journal |
 | `src/telemetry.rs` | Builds the LXMF telemetry field (`0x02`) for RCH map positions |
 | `crates/kodiak-core` | Kodiak result contract, wake-word gate, `Engine`, `Transcriber` and `IntentClassifier` traits |
 | `crates/kodiak-asr` | Kodiak speech recognizers (Whisper; Parakeet with the `parakeet` feature) |
 | `crates/kodiak-intent` | Kodiak vocabularies, deterministic classifier, datasets, text CLI |
+| `crates/kodiak-laya` | Optional laya classifier, built only with Sigil's `laya` feature |
 | `tests/kodiak_isolation.rs` | Fails if a Kodiak package starts depending on Sigil code |
 | `KODIAK_EXTRACTION.md` | How the Kodiak packages move to `FreeTAKTeam/R3AKT-Kodiak` |
 | `send_lxmf.py`, `test_send_lxmf.py` | Legacy standalone publisher using Fabric's HTTP API, with its tests |
 | `gateway.example.toml` | Template for embedded-gateway settings |
 | `lxmf.toml` | Settings for the legacy Python publisher |
 | `scripts/package-*.{ps1,sh}` | Release bundle scripts |
+| `THIRD_PARTY_NOTICES.md` | Licences of the native libraries and models the bundles ship or need |
 | `docs/architecture.md` | Gateway architecture notes, shipped in release bundles |
 | `models/`, `transcripts/`, `data/`, `dist/`, `target/` | Local, git-ignored: models, outputs, runtime state, bundles, build output |
 
@@ -59,10 +62,11 @@ Subcommands:
 
 | Command | What it does |
 |---|---|
-| `listen` | Live receive. Options: `--device-index`, `--gain-db` (29.7), `--squelch-dbfs` (auto-calibrated if omitted), `--ppm`, `--monitor-power`, `--config FILE`, `--bss` or `--bss-only`, `--bss-diagnostics`, `--bss-capture WAV`, `--correlation-timeout-ms` (200–30000). |
-| `wav INPUT` | Transcribe one WAV file (8–192 kHz, at most 5 minutes). This bypasses the pipeline and BSS. |
-| `bss-wav INPUT` | Decode BSS from a demodulated-audio WAV. It resamples to 16 kHz when Yodel does not support the input rate. |
-| `gateway-wav INPUT --rf-open START:END ...` | Replay a 32 kHz `--bss-capture` file through the voice, BSS, correlation and ASR stages. Each `--rf-open` gives a squelch-open interval in ms. |
+| `listen` | Live receive. Options: `--device-index`, `--gain-db` (29.7), `--squelch-dbfs` (auto-calibrated if omitted), `--ppm`, `--monitor-power`, `--config FILE`, `--bss` or `--bss-only`, `--bss-diagnostics`, `--bss-capture WAV` (closed and finalized after 1,000,000,000 samples, about 8 h 40 min at 32 kHz), `--correlation-timeout-ms` (200–30000), `--trailing-id-gap-ms` (0–10000). |
+| `wav INPUT` | Transcribe one WAV file (8–192 kHz, at most 5 minutes). This bypasses the pipeline and BSS. `--config FILE` uses that file's `[kodiak]` section and wake words; otherwise the defaults. |
+| `bss-wav INPUT` | Decode BSS from a demodulated-audio WAV. It resamples to 16 kHz when Yodel does not support the input rate. It stops with an error at the first event or diagnostic that cannot be saved. |
+| `gateway-wav INPUT --rf-open START:END ...` | Replay a 32 kHz `--bss-capture` file through the voice, BSS, correlation and ASR stages. Each `--rf-open` gives a squelch-open interval in ms. Also takes `--correlation-timeout-ms` (5000), `--trailing-id-gap-ms` (3000) and `--config FILE` (as for `wav`). |
+| `radios --config FILE list\|add\|import\|remove` | Manage the encrypted radio identity registry; see [Identity registry](#identity-registry-identityrs). |
 
 The BSS decoder runs in `listen` when any of these holds: `--bss`, `--bss-only`, `[rch].enabled`, or a `--config` was given with `[processing].parallel_voice_bss = true`, which is the default. `--bss-only` skips loading an ASR model.
 
@@ -82,7 +86,7 @@ flowchart LR
 ```
 
 - **Squelch calibration.** Without `--squelch-dbfs`, the receiver discards 5 settling blocks. It then measures the remaining blocks of the first second and sets the threshold to the median level plus 8 dB, clamped to −120…0 dBFS. With a manual threshold it only skips the 5 settling blocks.
-- **USB reader thread.** A dedicated thread reads 256 KB (128 ms) USB transfers and queues up to 32 of them for the DSP, so the dongle is drained even while a block is processed. Transfers are reassembled into 40,960-byte blocks, preserving I/Q pairing. If the DSP falls more than the queue behind, whole transfers are dropped and logged as `Signal processing fell behind`.
+- **USB reader thread.** A dedicated thread reads 256 KB (128 ms) USB transfers and queues up to 32 of them for the DSP, so the dongle is drained even while a block is processed. Transfers are reassembled into 40,960-byte blocks, preserving I/Q pairing. If the DSP falls more than the queue behind, whole transfers are dropped and logged as `Signal processing fell behind`. The next delivered transfer reports the loss: the partly filled block is discarded, I/Q pairing is restored, and the pipeline skips the lost block indices (`radio::Event::Lost`, `Ingress::skip`), so both lanes see a gap. Each block is timestamped with the time its last sample arrived over USB.
 - **`--monitor-power`** logs the peak channel level, the threshold, and whether squelch opened, once per second.
 
 ## Voice capture (`capture.rs`)
@@ -114,7 +118,7 @@ flowchart TD
     CO --> FS["gateway_*.json"]
 ```
 
-**Back-pressure policy.** In live mode the ingress uses `try_send`. When a worker falls behind, blocks are dropped rather than stalling the USB reader. The drop counts are logged at exit, and the worker sees a gap in block indices. Replay mode uses blocking `send`, so it never drops.
+**Back-pressure policy.** In live mode the ingress uses `try_send`. When a worker falls behind, blocks are dropped rather than stalling the USB reader. The worker sees a gap in block indices. Drop counts for USB, voice and BSS are logged when they change, at most once a minute, and again at exit. Replay mode uses blocking `send`, so it never drops.
 
 **Gaps.** A worker that sees a missing index sends `Event::Gap`. The voice worker restarts its capture state at the new index, and the BSS decoder resets its demodulator, NRZI and framer. The coordinator records a `processing_failure` event. Any transcript whose correlation window overlaps a gap becomes `incomplete_audio`.
 
@@ -128,7 +132,13 @@ flowchart TD
    - It names the job `voice-<started_at>-<first_frame>` and sends it to ASR with a non-blocking send. A full queue is recorded as a failure.
 3. **`settle`** attributes each pending transcript once both watermarks pass `span.end + window`. It writes the event when both text and attribution are known. It also expires history older than `MAX_CLIP_FRAMES + 2 × window`.
 
-Workers run inside `catch_unwind`. A panic in ASR marks the recognizer unavailable for later clips but keeps BSS running.
+Workers run inside `catch_unwind`. Failures that affect one item are recorded as `processing_failure` events and the run continues:
+
+- a recognizer panic fails only its clip; Kodiak discards the recognizer and reloads the model for the next clip;
+- a BSS event or diagnostic that cannot be saved is reported once, then only logged until saving works again; the packet gets no event, so a later repetition of it is saved;
+- a `--bss-capture` write error closes the capture.
+
+Fatal failures set the stop flag so the live receiver ends; `processing::run` then returns the error and the process exits with a non-zero status. These are recorded as `processing_failure` and the workers drain first: a panic in the voice or BSS worker, a BSS lane that ends with an error, and recognizer panics on `MAX_CONSECUTIVE_ASR_PANICS` (3) consecutive clips, after which clips still waiting for recognition fail. A panic in the coordinator itself is logged and fatal as well. In `listen`, a publisher panic also stops the receiver and fails the run.
 
 The run ends when both lanes report `Done` and nothing is waiting or pending. Ctrl+C therefore drains queued clips before exit.
 
@@ -175,7 +185,7 @@ Leading IDs (BSS sent on PTT press) are deliberately not used.
 
 ## Transcription and voice commands (Kodiak)
 
-`main.rs` builds one `kodiak_core::Engine` per process. It combines the `DeterministicClassifier` with a `kodiak-asr` recognizer that loads on the first clip, and the ASR worker calls `Engine::process_audio` for each clip.
+`main.rs` builds one `kodiak_core::Engine` per process. It combines the `DeterministicClassifier` (or, in a build with `--features laya` and `[kodiak].classifier = "laya"`, the `LayaClassifier` in hybrid mode) with a `kodiak-asr` recognizer that loads on the first clip, and the ASR worker calls `Engine::process_audio` for each clip. A failed load is retried on a later clip, at most every 30 s (`ASR_RETRY_INTERVAL`); until then each clip fails with the load error. The activation word and its spellings come from `[kodiak].wake_words`.
 
 - **Whisper.** CPU only, greedy decoding, English, `no_context`, blank and non-speech tokens suppressed.
 - **Parakeet.** Sherpa-ONNX `nemo_transducer`. The model directory needs `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt`.
@@ -226,6 +236,9 @@ In `listen`, the coordinator writes `gateway_*.json` even without `--config` or 
 | `[kodiak].wake_words` | `kodiak` plus the observed recognizer spellings | Accepted spellings of the activation word |
 | `[kodiak].bss_heading_is_compass` | `false` | Treat the BSS heading as a verified compass heading. It is required for clock-direction contact reports. |
 | `[kodiak].marker_max_fix_age_s` | `300` | Oldest stored fix a contact marker may use when its transmission carried no position |
+| `[kodiak].classifier` | `deterministic` | `deterministic` (vocabulary rules) or `laya` (laya typed decisions checked against the rules). `laya` needs a build with `--features laya`. |
+| `[kodiak].laya_checkpoint` | `models/laya/english` | laya checkpoint directory, relative to the TOML file |
+| `[kodiak].laya_threshold` | `0.85` | Minimum calibrated probability for laya to confirm or add an intent. Above 0.5 and at most 1. |
 | `[receiver].antenna` | unset | SDR antenna position, `{ latitude = …, longitude = … }` in decimal degrees. When set, the log shows each BSS packet's distance from the antenna (`BSS sender "Corvo" 116 m from the antenna, saved to …`). Events are unchanged |
 
 ## Identity registry (`identity.rs`)
@@ -314,7 +327,7 @@ The Rust tests are hardware-free and synthesize their own signals:
 | `tests/kodiak_isolation.rs` | Kodiak packages reference no Sigil, LXMF, Reticulum or SDR code |
 | `kodiak-*` packages | Result contract, wake word, shared lazy model, 94-case evaluation set, fuzzy correction, about 1,000 generated utterances. See [docs/kodiak.md](kodiak.md). |
 
-`scripts/package-windows.ps1 [-WhisperOnly] [-ModelPath …]` and `scripts/package-linux.sh [model]` build a release and bundle the binary, the runtime DLLs (Parakeet on Windows), `gateway.example.toml`, the README, `docs/architecture.md`, `docs/developer-guide.md`, the license and an optional model into `dist/`.
+`scripts/package-windows.ps1 [-WhisperOnly] [-ModelPath …]` and `scripts/package-linux.sh [model]` (`WHISPER_ONLY=1` for Whisper only) build a release into a fresh `dist/r3akt-sigil-<version>-<windows|linux>-<arch>-<backend>` folder. The bundle holds the binary, the Sherpa-ONNX and ONNX Runtime libraries (Parakeet builds only), `gateway.example.toml`, `lxmf.toml`, `send_lxmf.py`, `test_send_lxmf.py`, the README, `KODIAK_EXTRACTION.md`, the four documents in `docs/` with the logo, `LICENSE`, `THIRD_PARTY_NOTICES.md`, `crates/kodiak-laya/NOTICE` and an optional model under its own name. Each script then writes a `.zip` or `.tar.gz` archive and a `.sha256` file next to it.
 
 ## Pinned external dependencies
 

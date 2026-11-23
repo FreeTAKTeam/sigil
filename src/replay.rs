@@ -1,6 +1,7 @@
 use std::ops::Range;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result, ensure};
 use chrono::{TimeDelta, Utc};
@@ -49,12 +50,15 @@ pub fn run(
     let mut voice = VoiceAudio::new()?;
     let start = Utc::now();
     let transcribe = |clip: &Clip| output.transcribe(engine, clip, Source::Wav);
+    // A replay drains the whole file even after a fatal failure.
+    let stop = AtomicBool::new(false);
     processing::run(
         output,
         Source::Wav,
         timing,
         Some(transcribe),
         Some(Decoder::new(rate, Source::Wav, false, None)?),
+        &stop,
         |ingress| {
             for (index, raw) in audio.chunks(IF_FRAME_LEN).enumerate() {
                 let t = (index * FRAME_MS) as u64;
