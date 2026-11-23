@@ -286,13 +286,13 @@ Retries back off at `3 × 2^min(attempts, 7)` seconds with ±20 % jitter, never 
 **Message content.**
 
 - A transcript without a Kodiak intent becomes a chat message whose body is the transcript text. With `[rch].chat_header = true` the body is `Radio: <name>\nFrequency: <MHz>\nTime: <RFC3339>\n\n<text>`.
-- A transcript with a Kodiak intent goes through `intents::plan`, which produces one of three messages, all sent with LXMF field `0x09` (`FIELD_COMMANDS`) and message kind `Application`:
-  - an MECP report becomes `mission.registry.log_entry.upsert` with the unmodified MECP text, plus field `0x02` telemetry (`telemetry::field`) in the same message when the radio has a fix;
-  - a contact report becomes `mission.marker.create` at the computed contact position;
-  - an RCH command is forwarded with its own name, so RCH authorizes it.
+- A transcript with a Kodiak intent goes through `intents::plan`, which produces one of three messages, all carrying LXMF field `0x09` (`FIELD_COMMANDS`) and sent with message kind `Application`. With presence (a `position` event, field `0x02` only) and chat they are the message types Sigil distinguishes; `intents::MessageType` names them, and the delivery record stores it as `message_type`:
+  - an MECP report is an **event**: `mission.registry.log_entry.upsert` with the unmodified MECP text and, when the radio has a fix, `latitude` and `longitude` arguments. RCH stores them as the event position (`r3akt-rch-core` `log_entry_position`) and relays them to REM. The message has no telemetry field;
+  - a contact report is a **marker** at the computed contact position. Its fields come from `r3akt_map_core::marker_wire::encode_fields`, called as REM calls it for a marker it creates: the `mission.marker.create` command in field `0x09`, the `mission.marker.created` replica in field `0x0D` and the Sideband-compatible object in field `0x03`;
+  - an RCH **command** is forwarded with its own name, so RCH authorizes it.
 - A Kodiak rejection is recorded as `ignored` in the journal, with the reason in `detail`, and nothing is sent.
-- **Position rule:** use the current BSS fix, otherwise the radio's last valid fix (`Registry::last_position`). With neither, a contact report is ignored and an MECP report is sent without telemetry.
-- A position becomes an empty-content message with field `0x02`. `telemetry::fields` encodes it with `r3akt-map-core`'s `telemetry_encode::encode`, exactly as REM encodes a position: time and location sensors, with 0 for readings BSS does not carry (accuracy, and altitude, speed or bearing when absent).
+- **Position rule:** use the current BSS fix, otherwise the radio's last valid fix (`Registry::last_position`). With neither, a contact report is ignored and an event is sent without a location.
+- A position is **presence**: an empty-content message with field `0x02`. `telemetry::fields` encodes it with `r3akt-map-core`'s `telemetry_encode::encode_with_information`. The time and location sensors are as REM encodes a position, with 0 for readings BSS does not carry (accuracy, and altitude, speed or bearing when absent). The radio's name is in Sideband's Information sensor, which RCH's web map uses to label the position.
 
 ## Legacy Python publisher
 
@@ -324,7 +324,7 @@ The Rust tests are hardware-free and synthesize their own signals:
 | `identity::*` | Distinct keys, lock exclusivity, restart, backup restore, corruption detection |
 | `telemetry::*` | RCH's decoder reads the REM Telemeter encoding back |
 | `publisher::*` | Loopback Reticulum peer receives signed chat and telemetry from two radio identities, plus a Kodiak RCH command as field 9. A rejected Kodiak command is not sent. Identities survive a restart. |
-| `intents::*` | Contact geodesy, the position fallback, the heading rule, MECP and marker field commands, RCH pass-through, MECP reports with telemetry fit one LXMF link packet |
+| `intents::*` | Contact geodesy, the position fallback, the heading rule, the event command with and without a location, the marker fields read back with `r3akt-map-core`, RCH pass-through, events with a location fit one LXMF link packet |
 | `tests/kodiak_isolation.rs` | Kodiak packages reference no Sigil, LXMF, Reticulum or SDR code |
 | `kodiak-*` packages | Result contract, wake word, shared lazy model, 94-case evaluation set, fuzzy correction, 1,140 generated utterances (MECP revision 9). See [docs/kodiak.md](kodiak.md). |
 

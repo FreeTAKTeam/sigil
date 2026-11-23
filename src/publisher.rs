@@ -33,7 +33,7 @@ use zeroize::Zeroizing;
 use crate::config::Config;
 use crate::correlation::{GatewayEvent, Kind, Unresolved};
 use crate::identity::{PASSPHRASE_ENV, Registered, Registry, UNIDENTIFIED, write_atomic};
-use crate::intents::{self, Plan};
+use crate::intents::{self, MessageType, Plan};
 use crate::output::{Source, log};
 use crate::telemetry;
 
@@ -59,6 +59,8 @@ const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(5);
 struct Sender {
     destination: Arc<Mutex<SingleInputDestination>>,
     hash: String,
+    /// The radio's Reticulum identity hash, in hex.
+    identity: String,
     propagation: LocalPropagation,
     name: String,
     last_announce: Option<Instant>,
@@ -153,6 +155,9 @@ struct Delivery {
     /// Why an event was ignored locally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// What was sent: presence, chat, event, marker or command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_type: Option<MessageType>,
 }
 
 #[derive(Serialize, Deserialize, Default, Eq, PartialEq)]
@@ -749,15 +754,32 @@ impl<'a> Publisher<'a> {
         self.announce_due();
         let sender = self.sender(id)?;
         delivery.source_destination = Some(sender.hash.clone());
-        let (content, fields, kind) = match &event.kind {
+        let (content, fields, kind, message_type) = match &event.kind {
             Kind::Transcript {
                 text,
                 kodiak,
                 position,
                 ..
             } => match self.plan_transcript(event, id, name, text, kodiak.as_deref(), *position)? {
-                Plan::Chat(body) => (body, None, MessageKind::Chat),
-                Plan::Command { body, fields } => (body, Some(fields), MessageKind::Application),
+                Plan::Chat(body) => (body, None, MessageKind::Chat, MessageType::Chat),
+                Plan::Event { body, fields } => (
+                    body,
+                    Some(fields),
+                    MessageKind::Application,
+                    MessageType::Event,
+                ),
+                Plan::Marker { body, fields } => (
+                    body,
+                    Some(fields),
+                    MessageKind::Application,
+                    MessageType::Marker,
+                ),
+                Plan::Command { fields } => (
+                    String::new(),
+                    Some(fields),
+                    MessageKind::Application,
+                    MessageType::Command,
+                ),
                 Plan::Ignore(reason) => {
                     log(format_args!("Ignored {} from {id}: {reason}", event.id));
                     delivery.status = Status::Ignored;
@@ -771,16 +793,18 @@ impl<'a> Publisher<'a> {
             },
             Kind::Position { position, .. } if self.config.rch.send_telemetry => (
                 String::new(),
-                Some(telemetry::fields(*position, event.timestamp)?),
+                Some(telemetry::fields(*position, event.timestamp, name)?),
                 MessageKind::Telemetry {
                     key: event.id.clone(),
                 },
+                MessageType::Presence,
             ),
             _ => {
                 delivery.status = Status::NoMessage;
                 return Ok(());
             }
         };
+        delivery.message_type = Some(message_type);
         let entry = if let Some(existing) = Self::stored(sender, &event.id)? {
             existing
         } else {
@@ -854,6 +878,7 @@ impl<'a> Publisher<'a> {
     ) -> Result<Plan> {
         let facts = intents::Context {
             radio_name: name,
+            source_identity: &self.sender(id)?.identity,
             event_id: &event.id,
             frequency_hz: event.frequency_hz,
             timestamp: event.timestamp,
@@ -905,8 +930,10 @@ impl<'a> Publisher<'a> {
                 delivery.status = Status::TransportConfirmed;
             }
             log(format_args!(
-                "Fabric dispatched {} from {id} ({})",
-                report.message_id.0, sender.hash
+                "Fabric dispatched {} {} from {id} ({})",
+                delivery.message_type.map_or("message", MessageType::as_str),
+                report.message_id.0,
+                sender.hash
             ));
         }
         Ok(())
@@ -962,6 +989,11 @@ impl<'a> Publisher<'a> {
             source == registered.destination,
             "Fabric registered a different delivery destination"
         );
+        let identity = registered
+            .private_identity
+            .as_identity()
+            .address_hash
+            .to_hex_string();
         let mut config = InProcessBackendConfig::new(
             format!("r3akt-sigil:{id}"),
             self.runtime.handle().clone(),
@@ -984,6 +1016,7 @@ impl<'a> Publisher<'a> {
             Sender {
                 destination,
                 hash: source.to_hex_string(),
+                identity,
                 propagation,
                 name,
                 last_announce: None,

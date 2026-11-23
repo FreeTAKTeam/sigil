@@ -11,7 +11,7 @@ registry_path = "data/identities"
 allowlist = ["Corvo", "BLACKY"]
 # Publish speech that carried no BSS ID from a separate gateway identity.
 # It never uses a radio's identity. It has no GPS position: contact reports
-# from it are ignored, and its MECP reports are sent without telemetry.
+# from it are ignored, and its MECP events are sent without a location.
 unidentified_sender = false
 unidentified_name = "Unidentified radio"
 
