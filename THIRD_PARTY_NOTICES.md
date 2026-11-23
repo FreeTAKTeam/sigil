@@ -1,6 +1,6 @@
 # Third-party notices
 
-R3AKT Sigil is licensed under GPL-2.0-or-later (see `LICENSE`). This file lists the third-party native libraries and model files that the release bundles ship or need, with the licence each one declares and where that licence was read. Rust crate dependencies are recorded in `Cargo.lock`; each declares its licence in its own manifest.
+R3AKT Sigil, including the Kodiak packages under `crates/`, is licensed under EPL-2.0 (see `LICENSE`). This file lists the third-party native libraries and model files that the release bundles ship or need, with the licence each one declares and where that licence was read. Rust crate dependencies are recorded in `Cargo.lock`; each declares its licence in its own manifest.
 
 ## Speech recognition
 
@@ -31,7 +31,17 @@ The release scripts do not build the `laya` feature. See [crates/kodiak-laya/NOT
 
 | Component | Where it comes from | Licence | Read from |
 |---|---|---|---|
-| libusb | The copy bundled in `libusb1-sys` 0.7.0, built through `rusb`'s `vendored` feature | LGPL-2.1 (`libusb1-sys` itself declares MIT) | `libusb1-sys-0.7.0/libusb/COPYING`; `libusb1-sys-0.7.0/Cargo.toml` |
+| rtl-sdr-rs 0.4.3 | The RTL-SDR USB driver, from crates.io ([ccostes/rtl-sdr-rs](https://github.com/ccostes/rtl-sdr-rs)), used unmodified | MPL-2.0 | `rtl-sdr-rs-0.4.3/Cargo.toml` and `LICENSE` |
+| SDR-RS DSP crates `sdr-dsp` and `sdr-types` | [jasonherald/rtl-sdr](https://github.com/jasonherald/rtl-sdr) at commit `4380abf` | MIT, as declared at that commit. The commit has no licence file, its source describes the DSP code as a port of SDR++ (GPL-3.0), and the repository has since declared GPL-2.0-or-later. Not resolved. | Workspace `Cargo.toml` at commit `4380abf` and today; `crates/sdr-dsp/src` |
 | SQLite | The amalgamation bundled in `libsqlite3-sys` 0.39.1, built through `rusqlite`'s `bundled` feature | Public-domain dedication ("The author disclaims copyright to this source code") | `libsqlite3-sys-0.39.1/sqlite3/sqlite3.c`; `libsqlite3-sys-0.39.1/Cargo.toml` declares MIT for the crate |
+
+## librtlsdr driver (only in builds with `--features librtlsdr`)
+
+| Component | Where it comes from | Licence | Read from |
+|---|---|---|---|
+| librtlsdr-rs 0.3.0 | The alternative RTL-SDR USB driver, from crates.io ([jasonherald/librtlsdr-rs](https://github.com/jasonherald/librtlsdr-rs)) | GPL-2.0-or-later | `librtlsdr-rs-0.3.0/Cargo.toml` |
+| libusb | The copy bundled in `libusb1-sys` 0.7.0, built through `rusb`'s `vendored` feature | LGPL-2.1 (`libusb1-sys` itself declares MIT) | `libusb1-sys-0.7.0/libusb/COPYING`; `libusb1-sys-0.7.0/Cargo.toml` |
+
+A binary built with this feature carries GPL-2.0-or-later. The release scripts do not build it.
 
 The files named under "Read from" are in the Cargo registry source of each crate, except `crates/kodiak-asr/README.md`, which is in this repository.

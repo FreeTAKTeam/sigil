@@ -91,16 +91,16 @@ Keep the Sherpa-ONNX and ONNX Runtime DLLs next to the Windows executable; the b
 
 ## Build and test
 
-Use the pinned Rust MSVC toolchain, Visual Studio C++ Build Tools with a Windows SDK, CMake on PATH, and an x64 LLVM installation. Point `LIBCLANG_PATH` to the directory containing `libclang.dll` if Cargo cannot discover it. The headless build fetches the pinned SDR-RS DSP dependencies, compiles bundled libusb and whisper.cpp, and downloads the Sherpa-ONNX shared libraries for Parakeet.
+Use the pinned Rust MSVC toolchain, Visual Studio C++ Build Tools with a Windows SDK, CMake on PATH, and an x64 LLVM installation. Point `LIBCLANG_PATH` to the directory containing `libclang.dll` if Cargo cannot discover it. The headless build fetches the pinned SDR-RS DSP dependencies, compiles whisper.cpp, and downloads the Sherpa-ONNX shared libraries for Parakeet.
 
 ```powershell
 cargo build --release --locked
 cargo test --release --locked --workspace
 ```
 
-Windows USB requires the dongle’s SDR interface to expose a working USB driver compatible with libusb. WinUSB is the supported setup for the NESDR. [Nooelec installation guide](https://support.nooelec.com/hc/en-us/articles/360005298053-NESDR-Installation-Guide) · [libusb Windows support](https://github.com/libusb/libusb/wiki/Windows)
+Windows USB requires the dongle’s SDR interface to use the WinUSB driver. [Nooelec installation guide](https://support.nooelec.com/hc/en-us/articles/360005298053-NESDR-Installation-Guide)
 
-The radio path uses the CPU-only [SDR-RS DSP crates](https://github.com/jasonherald/rtl-sdr/tree/4380abf4eb7e74953623d063477f89f9b47876d6/crates/sdr-dsp) for decimation, filtering, FM demodulation and channel squelch. The USB driver is [librtlsdr-rs](https://github.com/jasonherald/librtlsdr-rs). The transcription path uses the same [whisper-rs binding](https://docs.rs/whisper-rs/0.16.0/whisper_rs/) as SDR-RS.
+The radio path uses the CPU-only [SDR-RS DSP crates](https://github.com/jasonherald/rtl-sdr/tree/4380abf4eb7e74953623d063477f89f9b47876d6/crates/sdr-dsp) for decimation, filtering, FM demodulation and channel squelch. The USB driver is [rtl-sdr-rs](https://github.com/ccostes/rtl-sdr-rs) (MPL-2.0), which supports dongles with R820T and R828D tuners. To use [librtlsdr-rs](https://github.com/jasonherald/librtlsdr-rs) instead, which also supports E4000, FC0012, FC0013 and FC2580 tuners, build with `--features librtlsdr`. librtlsdr-rs is GPL-2.0-or-later, so a binary built that way carries that licence; the packaging scripts never enable it. The transcription path uses the same [whisper-rs binding](https://docs.rs/whisper-rs/0.16.0/whisper_rs/) as SDR-RS.
 
 ### Package for Windows and Linux
 
@@ -205,3 +205,7 @@ Replay the same discriminator audio through both workers with `gateway-wav`. Sup
 ```
 
 Set `forward_bss = true` under `[lxmf]` to forward live BSS messages through the existing watcher. Forwarded chat includes sender and any BSS text. Coordinates and raw location bytes stay in the local event. Start the watcher before receiving the packets you want to forward.
+
+## Licence
+
+R3AKT Sigil and the Kodiak packages under `crates/` are licensed under the Eclipse Public License 2.0; see [LICENSE](LICENSE). [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists the licences of the third-party libraries and models.

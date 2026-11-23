@@ -335,7 +335,7 @@ The Rust tests are hardware-free and synthesize their own signals:
 | Dependency | Source and pin |
 |---|---|
 | SDR DSP and types | `jasonherald/rtl-sdr` @ `4380abf` |
-| USB driver | `librtlsdr-rs` 0.3.0 (bundled libusb via `rusb`) |
+| USB driver | `rtl-sdr-rs` 0.4.3 (pure-Rust USB via `nusb`). With `--features librtlsdr`: `librtlsdr-rs` 0.3.0 (bundled libusb via `rusb`), GPL-2.0-or-later |
 | LXMF, Fabric runtime, Reticulum transport | `FreeTAKTeam/LXMF-rs` @ `008bf9e` |
 | RCH telemetry codec | `r3akt-map-core` from `FreeTAKTeam/Reticulum-Community-Hub` @ `82f72e9` |
 | ASR (in `kodiak-asr`) | `whisper-rs` 0.16; `sherpa-onnx` 2.0.2 (optional) |

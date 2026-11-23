@@ -19,4 +19,4 @@ cargo run --release -p kodiak-laya --example probe -- models/laya/english "norma
 cargo run --release -p kodiak-laya --example probe_json -- models/laya/english questions.json states.jsonl
 ```
 
-Licence: the crate is GPL-2.0-or-later and depends on laya-candle, which is Apache-2.0. Read `NOTICE` before distributing a binary that includes it.
+Licence: the crate is EPL-2.0 and depends on laya-candle, which is Apache-2.0. Read `NOTICE` before distributing a binary that includes it.

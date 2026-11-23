@@ -26,7 +26,7 @@ Only the first word decides: a message that does not start with the activation w
 | `kodiak-core` | `serde`, `serde_json` | none | `KodiakResult` contract, `WakeWord`, `Engine`, `Transcriber` and `IntentClassifier` traits |
 | `kodiak-asr` | `kodiak-core` | `whisper` (default), `parakeet` | Recognizers taken from Sigil's former `transcription.rs` |
 | `kodiak-intent` | `kodiak-core`, `serde`, `toml` | none | Vocabularies, `DeterministicClassifier`, datasets, examples |
-| `kodiak-laya` | `kodiak-core`, `kodiak-intent`, `laya-candle`, `serde_json` | none | Optional `LayaClassifier` (`laya/2`), the `evaluate_laya`, `probe` and `probe_json` examples. Linked into Sigil only with `--features laya`; workspace builds and tests compile it. Binaries that include it are GPLv3-or-later (see its `NOTICE`). |
+| `kodiak-laya` | `kodiak-core`, `kodiak-intent`, `laya-candle`, `serde_json` | none | Optional `LayaClassifier` (`laya/2`), the `evaluate_laya`, `probe` and `probe_json` examples. Linked into Sigil only with `--features laya`; workspace builds and tests compile it. It depends on Apache-2.0 `laya-candle` (see its `NOTICE`). |
 
 Text-only use needs only `kodiak-core` and `kodiak-intent`, and loads no speech model. `Engine::with_transcriber_loader` loads the speech model on the first audio message and keeps the loader. A failed load is reported for each audio message and retried at most once every 30 s (`ASR_RETRY_INTERVAL`). If the recognizer panics, the panic reaches the caller, and the next audio message discards that recognizer and loads the model again. One `Engine` is `Send + Sync`, and Sigil shares a single engine, and so a single loaded model, across every radio it hears.
 

@@ -7,13 +7,15 @@ use std::path::{Path, PathBuf};
 const PACKAGES: [&str; 4] = ["kodiak-core", "kodiak-asr", "kodiak-intent", "kodiak-laya"];
 
 /// Crates that belong to Sigil's radio, data and publishing layers.
-const FORBIDDEN: [&str; 11] = [
+const FORBIDDEN: [&str; 13] = [
     "r3akt-sigil",
     "r3akt_sigil",
     "lxmf",
     "rns-transport",
     "reticulum",
     "librtlsdr",
+    "rtl-sdr-rs",
+    "rtl_sdr_rs",
     "rusb",
     "sdr-dsp",
     "sdr-types",

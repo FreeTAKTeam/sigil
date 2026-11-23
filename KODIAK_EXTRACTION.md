@@ -9,7 +9,7 @@ R3AKT Kodiak is developed inside the Sigil workspace for now. Its four packages 
 | `crates/kodiak-core` | `kodiak-core` | Result contract (`kodiak.result.v2`), wake-word gate, `Engine`, `Transcriber` and `IntentClassifier` traits |
 | `crates/kodiak-asr` | `kodiak-asr` | Offline recognizers: whisper.cpp (feature `whisper`, default) and Parakeet TDT via Sherpa-ONNX (feature `parakeet`) |
 | `crates/kodiak-intent` | `kodiak-intent` | Versioned vocabularies, the deterministic classifier, datasets, the text CLI and evaluation examples |
-| `crates/kodiak-laya` | `kodiak-laya` | Optional laya typed-decision classifier (`laya/2`), its questions and the `evaluate_laya` benchmark. Depends on `laya-candle` (Apache-2.0): binaries that include it are GPLv3-or-later; see its `NOTICE`. Model files are not part of the package. |
+| `crates/kodiak-laya` | `kodiak-laya` | Optional laya typed-decision classifier (`laya/2`), its questions and the `evaluate_laya` benchmark. Depends on `laya-candle` (Apache-2.0); see its `NOTICE`. Model files are not part of the package. |
 
 Everything else stays in Sigil. That includes `src/intents.rs`, which converts Kodiak results into RCH LXMF messages, and `tests/kodiak_isolation.rs`.
 
@@ -19,7 +19,7 @@ These rules hold today, and `tests/kodiak_isolation.rs` enforces them on every `
 
 - No Kodiak manifest uses `workspace = true` inheritance. Each sets its own edition, rust-version, licence and lints.
 - Path dependencies point only at sibling Kodiak packages (`../kodiak-*`). Each path dependency also carries a `version`, so the manifests stay valid after the move.
-- No Kodiak source or manifest names Sigil, LXMF, Reticulum, RTL-SDR, the SDR DSP crates, Yodel or `r3akt-map-core`.
+- No Kodiak source or manifest names Sigil, LXMF, Reticulum, the RTL-SDR drivers, the SDR DSP crates, Yodel or `r3akt-map-core`.
 - `include_str!` reads only files inside the package. The vocabularies and datasets live under `crates/kodiak-intent/`.
 - Model paths are always supplied by the caller. Kodiak has no default model location and no absolute paths.
 - Tests and examples need no SDR hardware. Only `kodiak-asr`'s `bench` example and `kodiak-laya`'s examples need model files.
@@ -41,7 +41,7 @@ On Windows, whisper.cpp's CMake build fails if the build directory path is too l
 
 ## Steps
 
-1. **Create the repository** `FreeTAKTeam/R3AKT-Kodiak`. Decide its licence before publishing: the packages currently declare Sigil's `GPL-2.0-or-later`. If you change it, change the `license` field in all four manifests. `kodiak-laya` links Apache-2.0 code, which GPL-2.0-only cannot accept.
+1. **Create the repository** `FreeTAKTeam/R3AKT-Kodiak`. The four packages are licensed under EPL-2.0: each manifest declares it, and Sigil's root `LICENSE` holds the text.
 2. **Carry the history.** In a fresh clone of Sigil, keep only the Kodiak paths and move them to the new repository's root layout:
 
    ```bash
@@ -49,7 +49,7 @@ On Windows, whisper.cpp's CMake build fails if the build directory path is too l
    ```
 
    If history is not needed, copy the four directories instead.
-3. **Add the root files:** the workspace manifest shown above with `"crates/kodiak-laya"` added to `members`, a copy of `rust-toolchain.toml` (Rust 1.96.0), `LICENSE`, a short `README.md` that links to the package READMEs, and CI that runs `cargo clippy --workspace --all-targets` and `cargo test --workspace`. CI needs CMake and libclang for whisper.cpp; run it with `--features kodiak-asr/parakeet` as well.
+3. **Add the root files:** the workspace manifest shown above with `"crates/kodiak-laya"` added to `members`, a copy of `rust-toolchain.toml` (Rust 1.96.0), `LICENSE` (EPL-2.0), a short `README.md` that links to the package READMEs, and CI that runs `cargo clippy --workspace --all-targets` and `cargo test --workspace`. CI needs CMake and libclang for whisper.cpp; run it with `--features kodiak-asr/parakeet` as well.
 4. **Generate a lockfile** with `cargo generate-lockfile`. To keep the versions Sigil was tested with, start from a copy of Sigil's `Cargo.lock` and run `cargo update --workspace`, which prunes unused entries.
 5. **Tag a release** such as `v0.1.0`, and record its commit hash.
 6. **Switch Sigil to the pinned Git dependency.** Delete `crates/kodiak-*`, remove the `[workspace]` section from Sigil's `Cargo.toml`, and replace the four path dependencies:

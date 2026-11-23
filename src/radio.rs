@@ -6,7 +6,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, TimeDelta, Utc};
 use clap::Args;
-use librtlsdr_rs::{RtlSdrDevice, RtlSdrReader};
 use sdr_dsp::correction::DcBlocker;
 use sdr_dsp::demod::FmDemod;
 use sdr_dsp::filter::{ComplexFirFilter, DecimatingFirFilter, DeemphasisFilter};
@@ -18,6 +17,8 @@ use sdr_types::Complex;
 use crate::audio::SAMPLE_RATE;
 use crate::capture::{AUDIO_FRAME_LEN, FRAME_MS};
 use crate::output::log;
+
+pub use driver::Device;
 
 const USB_RATE: u32 = 1_024_000;
 const IF_DOWNSAMPLE: u32 = 32;
@@ -69,8 +70,8 @@ impl Settings {
     }
 }
 
-pub fn open(frequency_hz: u32, settings: &Settings) -> Result<(RtlSdrDevice, String)> {
-    let mut device = RtlSdrDevice::open(settings.device_index)
+pub fn open(frequency_hz: u32, settings: &Settings) -> Result<(Device, String)> {
+    let mut device = Device::open(settings.device_index)
         .with_context(|| format!("open RTL-SDR device {}", settings.device_index))?;
     device
         .set_sample_rate(USB_RATE)
@@ -83,20 +84,11 @@ pub fn open(frequency_hz: u32, settings: &Settings) -> Result<(RtlSdrDevice, Str
     device
         .set_center_freq(frequency_hz)
         .with_context(|| format!("tune RTL-SDR to {frequency_hz} Hz"))?;
-    device
-        .set_tuner_gain_mode(true)
-        .context("enable manual tuner gain")?;
-    device
-        .set_agc_mode(false)
-        .context("disable RTL2832 automatic gain")?;
     // The validated user range fits in the driver's tenths-of-a-dB integer.
     #[expect(clippy::cast_possible_truncation)]
     let requested_gain = (settings.gain_db * 10.0).round() as i32;
     let gain = device
-        .closest_gain(requested_gain)
-        .context("read supported tuner gains")?;
-    device
-        .set_tuner_gain(gain)
+        .set_manual_gain(requested_gain)
         .context("set RTL-SDR tuner gain")?;
     device.reset_buffer().context("reset RTL-SDR USB buffer")?;
     Ok((device, format!("{:.1} dB", f64::from(gain) / 10.0)))
@@ -222,7 +214,7 @@ pub enum Event<'a> {
 }
 
 /// One USB transfer, the bytes dropped since the previous delivered
-/// transfer, and when `read_sync` returned it.
+/// transfer, and when the driver delivered it.
 struct Transfer {
     buffer: Vec<u8>,
     count: usize,
@@ -296,7 +288,7 @@ fn usb_duration(bytes: usize) -> TimeDelta {
 /// the lost samples shortened AFSK bits and broke BSS frames on a busy
 /// computer (21 November 2026).
 pub fn receive(
-    device: &RtlSdrDevice,
+    device: &Device,
     nfm: Nfm,
     calibrate_squelch: bool,
     monitor_power: bool,
@@ -328,44 +320,48 @@ pub fn receive(
 }
 
 fn read_usb(
-    reader: &RtlSdrReader,
+    reader: &driver::Reader<'_>,
     filled: &SyncSender<Transfer>,
     spare: &Receiver<Vec<u8>>,
     stopped: &AtomicBool,
 ) -> Result<()> {
     let mut lost = 0;
     let mut reuse = None;
-    while !stopped.load(Ordering::Relaxed) {
-        let mut buffer = reuse
-            .take()
-            .or_else(|| spare.try_recv().ok())
-            .unwrap_or_else(|| vec![0; USB_TRANSFER_BYTES]);
-        let count = reader
-            .read_sync(&mut buffer)
-            .context("read I/Q from RTL-SDR")?;
-        let read_at = Utc::now();
-        ensure!(count > 0, "RTL-SDR ended its I/Q stream");
-        match filled.try_send(Transfer {
-            buffer,
-            count,
-            lost,
-            read_at,
-        }) {
-            Ok(()) => lost = 0,
-            Err(TrySendError::Full(transfer)) => {
-                // The DSP is over USB_QUEUE transfers behind: keep the
-                // dongle drained and report the gap with the next transfer.
-                lost += count as u64;
-                let lost_ms = count as u64 * 1_000 / (2 * u64::from(USB_RATE));
-                log(format_args!(
-                    "Signal processing fell behind; dropped {lost_ms} ms of I/Q"
-                ));
-                reuse = Some(transfer.buffer);
+    reader
+        .stream(USB_TRANSFER_BYTES, |iq| {
+            let read_at = Utc::now();
+            if stopped.load(Ordering::Relaxed) {
+                return Ok(false);
             }
-            Err(TrySendError::Disconnected(_)) => break,
-        }
-    }
-    Ok(())
+            let mut buffer: Vec<u8> = reuse
+                .take()
+                .or_else(|| spare.try_recv().ok())
+                .unwrap_or_else(|| Vec::with_capacity(USB_TRANSFER_BYTES));
+            buffer.clear();
+            buffer.extend_from_slice(iq);
+            let count = buffer.len();
+            match filled.try_send(Transfer {
+                buffer,
+                count,
+                lost,
+                read_at,
+            }) {
+                Ok(()) => lost = 0,
+                Err(TrySendError::Full(transfer)) => {
+                    // The DSP is over USB_QUEUE transfers behind: keep the
+                    // dongle drained and report the gap with the next transfer.
+                    lost += count as u64;
+                    let lost_ms = count as u64 * 1_000 / (2 * u64::from(USB_RATE));
+                    log(format_args!(
+                        "Signal processing fell behind; dropped {lost_ms} ms of I/Q"
+                    ));
+                    reuse = Some(transfer.buffer);
+                }
+                Err(TrySendError::Disconnected(_)) => return Ok(false),
+            }
+            Ok(true)
+        })
+        .context("read I/Q from RTL-SDR")
 }
 
 fn process(
@@ -457,6 +453,156 @@ fn process(
         let _ = spare.try_send(buffer);
     }
     Ok(())
+}
+
+/// The RTL-SDR USB driver: `rtl-sdr-rs` (MPL-2.0; R820T and R828D tuners).
+#[cfg(not(feature = "librtlsdr"))]
+mod driver {
+    use anyhow::{Context, Result};
+    use rtl_sdr_rs::{CancelHandle, RtlSdr, TunerGain};
+
+    pub struct Device(RtlSdr);
+
+    pub struct Reader<'a>(&'a RtlSdr);
+
+    impl Device {
+        pub fn open(index: u32) -> Result<Self> {
+            Ok(Self(RtlSdr::open_with_index(usize::try_from(index)?)?))
+        }
+
+        pub fn set_sample_rate(&mut self, rate: u32) -> Result<()> {
+            Ok(self.0.set_sample_rate(rate)?)
+        }
+
+        pub fn set_freq_correction(&mut self, ppm: i32) -> Result<()> {
+            Ok(self.0.set_freq_correction(ppm)?)
+        }
+
+        pub fn set_center_freq(&mut self, frequency_hz: u32) -> Result<()> {
+            Ok(self.0.set_center_freq(frequency_hz)?)
+        }
+
+        /// Sets manual gain to the supported step nearest `tenths_db` and
+        /// returns it. The driver leaves the RTL2832's own AGC off.
+        pub fn set_manual_gain(&mut self, tenths_db: i32) -> Result<i32> {
+            let gain = self
+                .0
+                .get_tuner_gains()?
+                .into_iter()
+                .min_by_key(|gain| (gain - tenths_db).abs())
+                .context("tuner reports no gain steps")?;
+            self.0.set_tuner_gain(TunerGain::Manual(gain))?;
+            Ok(gain)
+        }
+
+        pub fn reset_buffer(&self) -> Result<()> {
+            Ok(self.0.reset_buffer()?)
+        }
+
+        pub fn reader(&self) -> Reader<'_> {
+            Reader(&self.0)
+        }
+    }
+
+    impl Reader<'_> {
+        /// Reads I/Q in transfers of `transfer_bytes` until `on_transfer`
+        /// returns `Ok(false)` or fails. Several transfers stay queued, so
+        /// the dongle is drained while `on_transfer` runs.
+        pub fn stream(
+            &self,
+            transfer_bytes: usize,
+            mut on_transfer: impl FnMut(&[u8]) -> Result<bool>,
+        ) -> Result<()> {
+            let cancel = CancelHandle::new();
+            let mut outcome = Ok(());
+            self.0.read_async(0, transfer_bytes, &cancel, |iq| {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                match on_transfer(iq) {
+                    Ok(true) => {}
+                    Ok(false) => cancel.cancel(),
+                    Err(error) => {
+                        outcome = Err(error);
+                        cancel.cancel();
+                    }
+                }
+            })?;
+            outcome
+        }
+    }
+}
+
+/// The RTL-SDR USB driver: `librtlsdr-rs` (GPL-2.0-or-later; five tuner
+/// families), selected by the `librtlsdr` feature.
+#[cfg(feature = "librtlsdr")]
+mod driver {
+    use std::marker::PhantomData;
+
+    use anyhow::{Context, Result, ensure};
+    use librtlsdr_rs::{RtlSdrDevice, RtlSdrReader};
+
+    pub struct Device(RtlSdrDevice);
+
+    pub struct Reader<'a>(RtlSdrReader, PhantomData<&'a ()>);
+
+    impl Device {
+        pub fn open(index: u32) -> Result<Self> {
+            Ok(Self(RtlSdrDevice::open(index)?))
+        }
+
+        pub fn set_sample_rate(&mut self, rate: u32) -> Result<()> {
+            Ok(self.0.set_sample_rate(rate)?)
+        }
+
+        pub fn set_freq_correction(&mut self, ppm: i32) -> Result<()> {
+            Ok(self.0.set_freq_correction(ppm)?)
+        }
+
+        pub fn set_center_freq(&mut self, frequency_hz: u32) -> Result<()> {
+            Ok(self.0.set_center_freq(frequency_hz)?)
+        }
+
+        /// Sets manual gain to the supported step nearest `tenths_db` and
+        /// returns it, with the RTL2832's own AGC off.
+        pub fn set_manual_gain(&mut self, tenths_db: i32) -> Result<i32> {
+            self.0.set_tuner_gain_mode(true)?;
+            self.0.set_agc_mode(false)?;
+            let gain = self
+                .0
+                .closest_gain(tenths_db)
+                .context("tuner reports no gain steps")?;
+            self.0.set_tuner_gain(gain)?;
+            Ok(gain)
+        }
+
+        pub fn reset_buffer(&self) -> Result<()> {
+            Ok(self.0.reset_buffer()?)
+        }
+
+        pub fn reader(&self) -> Reader<'_> {
+            Reader(self.0.reader(), PhantomData)
+        }
+    }
+
+    impl Reader<'_> {
+        /// Reads I/Q in transfers of `transfer_bytes` until `on_transfer`
+        /// returns `Ok(false)` or fails.
+        pub fn stream(
+            &self,
+            transfer_bytes: usize,
+            mut on_transfer: impl FnMut(&[u8]) -> Result<bool>,
+        ) -> Result<()> {
+            let mut buffer = vec![0; transfer_bytes];
+            loop {
+                let count = self.0.read_sync(&mut buffer)?;
+                ensure!(count > 0, "RTL-SDR ended its I/Q stream");
+                if !on_transfer(&buffer[..count])? {
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
