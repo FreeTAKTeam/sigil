@@ -6,7 +6,7 @@ This guide explains how the code works, for people changing it. For installing a
 
 `r3akt-sigil` is a Rust binary (edition 2024, toolchain 1.96.0, `unsafe_code = "forbid"`). Its workspace also holds the four packages of the R3AKT Kodiak voice-command engine under `crates/`, which will later move to their own repository ([docs/kodiak.md](kodiak.md), [KODIAK_EXTRACTION.md](../KODIAK_EXTRACTION.md)). Sigil:
 
-1. Tunes a USB RTL-SDR to one analog narrowband FM channel. The default is 435.9950 MHz.
+1. Tunes a USB RTL-SDR to one analog narrowband FM channel.
 2. Demodulates FM and splits the discriminator output into two paths: speech-band voice audio and unfiltered audio for the data modem.
 3. Cuts voice into clips by squelch and passes each clip to Kodiak. Kodiak transcribes it offline with NVIDIA Parakeet TDT v2 through Sherpa-ONNX (the default) or whisper.cpp, then returns chat, a voice-command intent or a rejection.
 4. Decodes BSS packets (Bell 202 AFSK, HDLC, CRC-16/X.25) that radios such as the VR-N76 send on PTT release. The packets carry a sender ID and, optionally, a GPS position.
@@ -35,7 +35,7 @@ This guide explains how the code works, for people changing it. For installing a
 | `crates/kodiak-core` | Kodiak result contract, wake-word gate, `Engine`, `Transcriber` and `IntentClassifier` traits |
 | `crates/kodiak-asr` | Kodiak speech recognizers (Whisper; Parakeet with the `parakeet` feature) |
 | `crates/kodiak-intent` | Kodiak vocabularies, deterministic classifier, datasets, text CLI |
-| `crates/kodiak-laya` | Optional laya classifier, built only with Sigil's `laya` feature |
+| `crates/kodiak-laya` | Optional laya classifier. Linked into Sigil only with `--features laya`; workspace builds and tests still compile it |
 | `tests/kodiak_isolation.rs` | Fails if a Kodiak package starts depending on Sigil code |
 | `KODIAK_EXTRACTION.md` | How the Kodiak packages move to `FreeTAKTeam/R3AKT-Kodiak` |
 | `send_lxmf.py`, `test_send_lxmf.py` | Legacy standalone publisher using Fabric's HTTP API, with its tests |
@@ -54,7 +54,7 @@ Global options apply to every subcommand.
 |---|---|---|
 | `--backend parakeet\|whisper` | `parakeet` | ASR backend. Parakeet TDT v2 (English, 0.6B, INT8) is the default; a build with `--no-default-features` has Whisper only and defaults to it. |
 | `--model PATH` | `models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8` or `models/ggml-base.en.bin` | Whisper model file or Parakeet model directory. The default is relative to the working directory. |
-| `--frequency-hz N` | `435995000` | Tuned frequency. In WAV modes it only labels output. |
+| `--frequency-hz N` | built in | Tuned frequency; set it to your channel. In WAV modes it only labels output. |
 | `--output-dir DIR` | `transcripts` | Destination for all JSON and WAV output |
 | `--save-wav` | off | Save each voice clip as a 16 kHz mono 16-bit WAV |
 
@@ -140,7 +140,7 @@ Workers run inside `catch_unwind`. Failures that affect one item are recorded as
 
 Fatal failures set the stop flag so the live receiver ends; `processing::run` then returns the error and the process exits with a non-zero status. These are recorded as `processing_failure` and the workers drain first: a panic in the voice or BSS worker, a BSS lane that ends with an error, and recognizer panics on `MAX_CONSECUTIVE_ASR_PANICS` (3) consecutive clips, after which clips still waiting for recognition fail. A panic in the coordinator itself is logged and fatal as well. In `listen`, a publisher panic also stops the receiver and fails the run.
 
-The run ends when both lanes report `Done` and nothing is waiting or pending. Ctrl+C therefore drains queued clips before exit.
+The run ends when both lanes report `Done` and nothing is waiting or pending. If a clip found the recognition queue closed, it also waits for the recognition worker's own `Done`, which carries the reason it stopped. Ctrl+C therefore drains queued clips before exit.
 
 ## Attribution rules (`correlation.rs`)
 
@@ -190,7 +190,7 @@ Leading IDs (BSS sent on PTT press) are deliberately not used.
 - **Whisper.** CPU only, greedy decoding, English, `no_context`, blank and non-speech tokens suppressed.
 - **Parakeet.** Sherpa-ONNX `nemo_transducer`. The model directory needs `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt`.
 - Both backends use up to 4 threads and collapse whitespace in the output.
-- **Result types.** Without the activation word "Kodiak", the result is chat. With it, the result is an MECP report, a contact report, an RCH command or a structured rejection. See [docs/kodiak.md](kodiak.md) for the contract, the vocabularies and the limitations.
+- **Result types.** When the first word is not the activation word "Kodiak" (or a misheard form of it before a recognized command), the result is chat. With it, the result is an MECP report, a contact report, an RCH command or a structured rejection. See [docs/kodiak.md](kodiak.md) for the contract, the vocabularies and the limitations.
 
 ## Output files
 
@@ -233,6 +233,7 @@ In `listen`, the coordinator writes `gateway_*.json` even without `--config` or 
 | `[rch].enabled` | `false` | Requires `R3AKT_IDENTITY_PASSPHRASE` (at least 16 bytes) in the environment |
 | `[rch].destination_hash` | `""` | 32 hex characters: the hub's `lxmf.delivery` hash |
 | `[rch].send_chat`, `[rch].send_telemetry`, `[rch].send_intents` | `true`, `true`, `true` | At least one must be `true`. `send_intents` publishes Kodiak MECP reports, contact markers and RCH commands. |
+| `[rch].chat_header` | `false` | Start each chat message with the radio name, frequency and transmission time (UTC). Off, the message is the spoken text alone. |
 | `[kodiak].wake_words` | `kodiak` plus the observed recognizer spellings | Accepted spellings of the activation word |
 | `[kodiak].bss_heading_is_compass` | `false` | Treat the BSS heading as a verified compass heading. It is required for clock-direction contact reports. |
 | `[kodiak].marker_max_fix_age_s` | `300` | Oldest stored fix a contact marker may use when its transmission carried no position |
@@ -264,7 +265,7 @@ Manage the registry with `r3akt-sigil radios --config <gateway.toml> list | add 
 The publisher runs on its own thread inside `listen` when `[rch].enabled`. Every 2 s, or sooner when unparked at shutdown, it:
 
 1. requests a path to the hub every 15 s, and announces each radio's `lxmf.delivery` destination with its display name every 90 s;
-2. scans the output directory for `gateway_*.json` events. It considers only events that are `source: live`, timestamped after the journal's `enabled.json` activation time, carry a valid ID, and are tied to a radio. At most 32 due jobs are taken per pass, oldest first.
+2. scans the output directory for `gateway_*.json` events. It considers only events that are `source: live`, timestamped after the journal's `enabled.json` activation time, carry a valid ID, and are tied to a radio (or, with `unidentified_sender`, are speech that carried no BSS ID). At most 32 due jobs are taken per pass, oldest first.
 3. keeps one journal record per event at `data/fabric/<hub-hash>/<event-id>.json`, with the status lifecycle:
 
 ```mermaid
@@ -280,11 +281,11 @@ stateDiagram-v2
     awaiting_proof --> expired
 ```
 
-Retries back off at `min(3 × 2^attempts, 300)` seconds. Each radio has its own Fabric `LocalPropagation` store (`radio-<ID>.sqlite3`). The signed LXMF message is stored there under the event ID as correlation ID before the first dispatch, so retries resend the same signed wire and never re-sign a new message.
+Retries back off at `3 × 2^min(attempts, 7)` seconds with ±20 % jitter, never above 300 s. Each radio has its own Fabric `LocalPropagation` store (`radio-<ID>.sqlite3`). The signed LXMF message is stored there under the event ID as correlation ID before the first dispatch, so retries resend the same signed wire and never re-sign a new message.
 
 **Message content.**
 
-- A transcript without a Kodiak intent becomes a chat message with the body `Radio: <name>\nFrequency: <MHz>\nTime: <RFC3339>\n\n<text>`.
+- A transcript without a Kodiak intent becomes a chat message whose body is the transcript text. With `[rch].chat_header = true` the body is `Radio: <name>\nFrequency: <MHz>\nTime: <RFC3339>\n\n<text>`.
 - A transcript with a Kodiak intent goes through `intents::plan`, which produces one of three messages, all sent with LXMF field `0x09` (`FIELD_COMMANDS`) and message kind `Application`:
   - an MECP report becomes `mission.registry.log_entry.upsert` with the unmodified MECP text, plus field `0x02` telemetry (`telemetry::field`) in the same message when the radio has a fix;
   - a contact report becomes `mission.marker.create` at the computed contact position;
@@ -325,7 +326,7 @@ The Rust tests are hardware-free and synthesize their own signals:
 | `publisher::*` | Loopback Reticulum peer receives signed chat and telemetry from two radio identities, plus a Kodiak RCH command as field 9. A rejected Kodiak command is not sent. Identities survive a restart. |
 | `intents::*` | Contact geodesy, the position fallback, the heading rule, MECP and marker field commands, RCH pass-through, MECP reports with telemetry fit one LXMF link packet |
 | `tests/kodiak_isolation.rs` | Kodiak packages reference no Sigil, LXMF, Reticulum or SDR code |
-| `kodiak-*` packages | Result contract, wake word, shared lazy model, 94-case evaluation set, fuzzy correction, about 1,000 generated utterances. See [docs/kodiak.md](kodiak.md). |
+| `kodiak-*` packages | Result contract, wake word, shared lazy model, 94-case evaluation set, fuzzy correction, 1,140 generated utterances (MECP revision 9). See [docs/kodiak.md](kodiak.md). |
 
 `scripts/package-windows.ps1 [-WhisperOnly] [-ModelPath …]` and `scripts/package-linux.sh [model]` (`WHISPER_ONLY=1` for Whisper only) build a release into a fresh `dist/r3akt-sigil-<version>-<windows|linux>-<arch>-<backend>` folder. The bundle holds the binary, the Sherpa-ONNX and ONNX Runtime libraries (Parakeet builds only), `gateway.example.toml`, `lxmf.toml`, `send_lxmf.py`, `test_send_lxmf.py`, the README, `KODIAK_EXTRACTION.md`, the four documents in `docs/` with the logo, `LICENSE`, `THIRD_PARTY_NOTICES.md`, `crates/kodiak-laya/NOTICE` and an optional model under its own name. Each script then writes a `.zip` or `.tar.gz` archive and a `.sha256` file next to it.
 
@@ -342,7 +343,7 @@ The Rust tests are hardware-free and synthesize their own signals:
 
 ## Notes for contributors
 
-- The block index is the single clock for correlation. Keep new timing logic in block indices, not wall-clock timestamps. Live timestamps are taken when a block is processed, not when it was sampled.
+- The block index is the single clock for correlation. Keep new timing logic in block indices, not wall-clock timestamps. Live timestamps are the time the block's last sample arrived over USB.
 - Every on-disk write must stay atomic: use `Output::save_event` or `identity::write_atomic`. The publisher and external tools read the directory concurrently.
 - `sdr.*` schema names are a contract with the publisher and downstream tools. Bump the version suffix on incompatible changes.
 - BSS is unauthenticated. The allowlist and registry decide only which gateway key signs a message. They do not prove who transmitted it.

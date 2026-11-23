@@ -381,6 +381,20 @@ impl<O: Oracle> LayaClassifier<O> {
     /// Step 3b: an MECP report led by a severity word.
     fn read_mecp(&self, words: &[&str], severity: &SeverityRead) -> Result<Classification, String> {
         let level = severity.level;
+        // laya only saw the first word. A two-word form ("may" of "may day")
+        // stands for both words only when the second one really completes a
+        // severity phrase; otherwise skipping it could drop an event word.
+        if severity.words > 1
+            && !words
+                .get(..severity.words)
+                .is_some_and(|spoken| self.questions.is_severity_phrase(level, spoken))
+        {
+            return Ok(rejected(
+                RejectReason::MissingParameter,
+                Some(Category::Mecp),
+                "the severity word is incomplete",
+            ));
+        }
         let report = words.get(severity.words..).unwrap_or_default().join(" ");
         let label = self.questions.severity_label(level).unwrap_or("routine");
         // The rules read the report with the canonical severity word, for

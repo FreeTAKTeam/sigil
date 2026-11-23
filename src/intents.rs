@@ -57,6 +57,10 @@ pub enum Plan {
 }
 
 /// Facts about the transmission that only Sigil knows.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent publishing switches"
+)]
 pub struct Context<'a> {
     pub radio_name: &'a str,
     pub event_id: &'a str,
@@ -72,6 +76,8 @@ pub struct Context<'a> {
     /// Oldest last-known fix a contact marker may use, in seconds.
     pub marker_max_fix_age_s: u64,
     pub send_chat: bool,
+    /// Start chat messages with the radio name, frequency and time.
+    pub chat_header: bool,
     pub send_intents: bool,
 }
 
@@ -106,6 +112,9 @@ impl Context<'_> {
     fn chat(&self, text: &str) -> Plan {
         if !self.send_chat {
             return Plan::Nothing;
+        }
+        if !self.chat_header {
+            return Plan::Chat(text.to_owned());
         }
         Plan::Chat(format!(
             "Radio: {}\nFrequency: {}\nTime: {}\n\n{text}",
@@ -311,6 +320,7 @@ mod tests {
             heading_is_compass: compass,
             marker_max_fix_age_s: 300,
             send_chat: true,
+            chat_header: false,
             send_intents: true,
         }
     }
@@ -381,10 +391,18 @@ mod tests {
 
     #[test]
     fn chat_and_rejections() {
-        let ctx = context(None, None, false);
-        assert!(
-            matches!(plan("hello", None, &ctx).unwrap(), Plan::Chat(body) if body.ends_with("\n\nhello"))
+        let mut ctx = context(None, None, false);
+        // By default the chat message is the spoken text alone.
+        assert_eq!(
+            plan("hello", None, &ctx).unwrap(),
+            Plan::Chat("hello".into())
         );
+        ctx.chat_header = true;
+        assert!(matches!(
+            plan("hello", None, &ctx).unwrap(),
+            Plan::Chat(body) if body.starts_with("Radio: R4\nFrequency: ") && body.ends_with("\n\nhello")
+        ));
+        ctx.chat_header = false;
         let rejected = KodiakResult::Rejected {
             rejection: Rejection::new(RejectReason::NoIntent, None, "no intent"),
             transcript: "Kodiak launch".into(),

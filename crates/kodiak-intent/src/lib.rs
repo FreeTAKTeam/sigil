@@ -43,7 +43,7 @@ pub use text::tokenize;
 use vocabulary::VocabularyError;
 
 /// Identifier recorded in results produced by [`DeterministicClassifier`].
-pub const DETERMINISTIC_ID: &str = "deterministic/5";
+pub const DETERMINISTIC_ID: &str = "deterministic/6";
 
 /// Rule-based classifier over the embedded vocabularies.
 pub struct DeterministicClassifier {
@@ -112,6 +112,22 @@ impl DeterministicClassifier {
             ));
         }
         if let Some(result) = self.rch.parse(tokens) {
+            // An argument takes every word after the command phrase, so a
+            // spoken correction would become part of it ("call me bravo, no,
+            // cancel that" as the nickname "bravo no cancel that").
+            if let Ok(Intent::RchCommand(command)) = &result
+                && !command.arguments.is_empty()
+                && let Some(word) = tokens
+                    .iter()
+                    .map(|t| t.word.as_str())
+                    .find(|word| self.contact.is_negation(word))
+            {
+                return Err(Rejection::new(
+                    RejectReason::Cancelled,
+                    Some(Category::Rch),
+                    format!("the command is negated or cancelled by {word:?}"),
+                ));
+            }
             return result;
         }
         let severity = tokens.iter().any(|t| self.mecp.severity(&t.word).is_some());
@@ -300,15 +316,12 @@ mod tests {
     fn a_configured_wake_word_replaces_kodiak() {
         let engine = Engine::new(DeterministicClassifier::new())
             .with_wake_word(WakeWord::with_forms(["falcon"]));
-        // Exact word, anywhere.
+        // Exact word, first.
         assert_eq!(
             engine_mecp(&engine, "Falcon, urgent need food."),
             "MECP/1/S02"
         );
-        assert_eq!(
-            engine_mecp(&engine, "hey falcon list users"),
-            "mission.users"
-        );
+        assert_eq!(engine_mecp(&engine, "hey falcon list users"), "chat");
         // Repeated.
         assert_eq!(
             engine_mecp(&engine, "Falcon falcon routine heading home"),
@@ -539,6 +552,52 @@ mod tests {
         // More than 200 bytes on the wire.
         let long = format!("mayday injured details {}", "very long words ".repeat(14));
         assert_eq!(reason(&long), RejectReason::InvalidParameter);
+    }
+
+    #[test]
+    fn review_findings_of_23_november_2026() {
+        // A spoken correction inside an argument cancels the command.
+        assert_eq!(
+            reason("call me bravo, no, cancel that"),
+            RejectReason::Cancelled
+        );
+        assert!(matches!(
+            classify("set nickname to Bravo"),
+            Ok(Intent::RchCommand(c)) if c.arguments["nickname"] == "Bravo"
+        ));
+        // A huge spoken number is not a number, and never overflows.
+        let huge = "nineteen-hundred-ninety-nine-thousand-".repeat(30);
+        let _ = classify(&format!("urgent injured {huge}"));
+        let engine = Engine::new(DeterministicClassifier::new());
+        // The engine's word limit counts hyphenated words.
+        let long = "nineteen-hundred-ninety-nine-thousand-".repeat(3000);
+        assert!(matches!(
+            engine.process_text(&kodiak_core::TextInput::new(format!(
+                "Kodiak urgent injured {long}"
+            ))),
+            KodiakResult::Rejected { .. }
+        ));
+        // A misheard repeated activation word adds no event.
+        let out = engine.process_text(&kodiak_core::TextInput::new(
+            "Kodiak, Cardiac, mayday severe bleeding",
+        ));
+        let KodiakResult::Intent {
+            intent: Intent::MecpReport(report),
+            corrections,
+            ..
+        } = out
+        else {
+            panic!("expected a report: {out:?}");
+        };
+        assert_eq!(report.content, "MECP/0/M06");
+        assert_eq!(corrections[0].heard, "Cardiac");
+        // Only the first word activates Kodiak.
+        for chat in ["I saw a kodiak bear yesterday", "Hey Kodiak, list users"] {
+            assert!(matches!(
+                engine.process_text(&kodiak_core::TextInput::new(chat)),
+                KodiakResult::Chat { .. }
+            ));
+        }
     }
 
     #[test]

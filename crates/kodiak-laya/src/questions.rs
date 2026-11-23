@@ -74,6 +74,8 @@ pub struct SeverityWord {
 #[derive(Debug)]
 pub struct QuestionSet {
     severity_words: Vec<SeverityWord>,
+    /// Every spoken severity phrase with its level, lower case.
+    severity_phrases: Vec<(u8, String)>,
     labels: Vec<(u8, String)>,
     codes: Vec<(String, String)>,
     commands: Vec<(String, String)>,
@@ -110,6 +112,11 @@ impl QuestionSet {
             .severities
             .iter()
             .map(|s| (s.level, s.label.to_lowercase()))
+            .collect();
+        let severity_phrases = mecp
+            .severities
+            .iter()
+            .flat_map(|s| s.words.iter().map(|w| (s.level, w.to_lowercase())))
             .collect();
 
         let rank = |code: &str| {
@@ -153,6 +160,7 @@ impl QuestionSet {
             .collect();
         Self {
             severity_words,
+            severity_phrases,
             labels,
             codes,
             commands,
@@ -194,6 +202,16 @@ impl QuestionSet {
     #[must_use]
     pub fn severity_word(&self, label: &str) -> Option<&SeverityWord> {
         self.severity_words.iter().find(|s| s.word == label)
+    }
+
+    /// Whether `words` spell a severity phrase of `level` ("may they" for
+    /// mayday), ignoring case.
+    #[must_use]
+    pub fn is_severity_phrase(&self, level: u8, words: &[&str]) -> bool {
+        let spoken = words.join(" ").to_lowercase();
+        self.severity_phrases
+            .iter()
+            .any(|(l, phrase)| *l == level && *phrase == spoken)
     }
 
     /// The vocabulary label of an MECP level, such as `routine`.

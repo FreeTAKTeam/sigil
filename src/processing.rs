@@ -460,6 +460,20 @@ struct Coordinator<'a> {
     stop: &'a AtomicBool,
     /// The first fatal failure, returned once the workers have drained.
     fatal: Option<String>,
+    /// Whether the recognition worker closed its queue and said why.
+    asr: AsrState,
+}
+
+/// The recognition worker closes its queue just before reporting why it
+/// stopped, so a clip can find the queue closed while the report is still
+/// on its way. Draining waits for the report.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AsrState {
+    Running,
+    /// A clip found the queue closed; the worker's report has not arrived.
+    Closed,
+    /// The worker reported that it stopped.
+    Done,
 }
 
 impl<'a> Coordinator<'a> {
@@ -490,6 +504,7 @@ impl<'a> Coordinator<'a> {
             recent_voice: VecDeque::new(),
             stop,
             fatal: None,
+            asr: AsrState::Running,
         }
     }
 
@@ -571,6 +586,7 @@ impl<'a> Coordinator<'a> {
                     }
                     Lane::Data => self.data_done = true,
                     Lane::Asr => {
+                        self.asr = AsrState::Done;
                         // The worker closed its queue: queued clips will not
                         // be transcribed, and later ones are refused.
                         for pending in &mut self.pending {
@@ -642,6 +658,9 @@ impl<'a> Coordinator<'a> {
                     self.failure("asr", "recognition queue is full".into());
                 }
                 Err(TrySendError::Disconnected(_)) => {
+                    if self.asr == AsrState::Running {
+                        self.asr = AsrState::Closed;
+                    }
                     self.failure("asr", "recognition worker is unavailable".into());
                 }
             }
@@ -765,7 +784,11 @@ impl<'a> Coordinator<'a> {
     }
 
     fn drained(&self) -> bool {
-        self.voice_done && self.data_done && self.pending.is_empty() && self.waiting.is_empty()
+        self.voice_done
+            && self.data_done
+            && self.pending.is_empty()
+            && self.waiting.is_empty()
+            && self.asr != AsrState::Closed
     }
 }
 
@@ -1241,6 +1264,40 @@ mod tests {
             })
             .collect();
         assert_eq!(transcripts, ["Second clip"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_closed_recognition_queue_waits_for_the_workers_reason() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let output = Output::new(temporary.path().to_owned(), 435_995_000, false)?;
+        let stop = AtomicBool::new(false);
+        let mut coordinator = Coordinator::new(&output, Source::Wav, 50, 15, true, false, &stop);
+        let (jobs, work) = sync_channel(ASR_QUEUE);
+        // The worker has closed its queue but not yet reported why.
+        drop(work);
+        let now = Utc::now();
+        coordinator.waiting.push_back((
+            Clip {
+                started_at: now,
+                ended_at: now,
+                first_frame: 0,
+                signal_first_frame: 0,
+                signal_last_frame: 19,
+                audio: vec![0.1; AUDIO_FRAME_LEN * 20],
+            },
+            20,
+        ));
+        coordinator.event(Event::Done(Lane::Voice, None));
+        coordinator.dispatch(&jobs);
+        assert!(coordinator.pending.is_empty());
+        assert!(!coordinator.drained(), "drained before the worker's error");
+        coordinator.event(Event::Done(
+            Lane::Asr,
+            Some("recognition panicked on 3 consecutive clips".into()),
+        ));
+        assert!(coordinator.drained());
+        assert!(coordinator.fatal.is_some());
         Ok(())
     }
 

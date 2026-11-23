@@ -10,8 +10,8 @@ auto_register = true
 registry_path = "data/identities"
 allowlist = ["Corvo", "BLACKY"]
 # Publish speech that carried no BSS ID from a separate gateway identity.
-# It never uses a radio's identity, and MECP or contact reports from it are
-# still ignored because it has no GPS position.
+# It never uses a radio's identity. It has no GPS position: contact reports
+# from it are ignored, and its MECP reports are sent without telemetry.
 unidentified_sender = false
 unidentified_name = "Unidentified radio"
 
@@ -23,6 +23,8 @@ local_storage_path = "data/fabric"
 enabled = false
 destination_hash = ""
 send_chat = true
+# Start each chat message with the radio name, frequency and time.
+chat_header = false
 send_telemetry = true
 # Publish Kodiak voice commands: MECP reports, contact markers and RCH commands.
 send_intents = true
@@ -38,8 +40,8 @@ bss_heading_is_compass = false
 marker_max_fix_age_s = 300
 # Command recognition: "deterministic" (vocabulary rules) or "laya" (a laya
 # typed-decision model checked against the rules; needs a `--features laya`
-# build and about 1.6 GB of RAM). laya also recovers a misheard activation
-# word such as "Kardiac" when it is confident.
+# build and a checkpoint of about 0.8 GB). Both classifiers accept a misheard
+# first word such as "Kardiac" (a deterministic check, not the model).
 classifier = "deterministic"
 # laya checkpoint directory (relative to this file) and the calibrated
 # probability every answer must reach.

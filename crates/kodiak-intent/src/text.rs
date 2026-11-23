@@ -242,28 +242,30 @@ pub fn number(words: &[&str]) -> Option<(f64, usize)> {
             ) {
                 break;
             }
-            current += value;
+            current = current.checked_add(value)?;
             last = Last::Unit;
         } else if let Some(value) = teen(word) {
             if !matches!(last, Last::Start | Last::Hundred | Last::Thousand) {
                 break;
             }
-            current += value;
+            current = current.checked_add(value)?;
             last = Last::Unit;
         } else if let Some(value) = tens(word) {
             if !matches!(last, Last::Start | Last::Hundred | Last::Thousand) {
                 break;
             }
-            current += value;
+            current = current.checked_add(value)?;
             last = Last::Tens;
         } else if word == "hundred" && matches!(last, Last::Unit | Last::Tens) {
-            current *= 100;
+            current = current.checked_mul(100)?;
             last = Last::Hundred;
         } else if word == "hundred" && last == Last::Start && current == 1 {
             current = 100;
             last = Last::Hundred;
         } else if word == "thousand" && last != Last::Thousand && (current > 0) {
-            total += current * 1000;
+            total = current
+                .checked_mul(1000)
+                .and_then(|v| total.checked_add(v))?;
             current = 0;
             last = Last::Thousand;
         } else if word == "and" && last == Last::Hundred {
@@ -278,7 +280,9 @@ pub fn number(words: &[&str]) -> Option<(f64, usize)> {
             if fraction.is_empty() {
                 break;
             }
-            let value = format!("{}.{fraction}", total + current).parse().ok()?;
+            let value = format!("{}.{fraction}", total.checked_add(current)?)
+                .parse()
+                .ok()?;
             return Some((value, index + 1 + used));
         } else {
             break;
@@ -289,7 +293,8 @@ pub fn number(words: &[&str]) -> Option<(f64, usize)> {
     while index > 0 && words[index - 1] == "and" {
         index -= 1;
     }
-    (last != Last::Start).then_some((f64::from(total + current), index))
+    let value = total.checked_add(current)?;
+    (last != Last::Start).then_some((f64::from(value), index))
 }
 
 #[cfg(test)]

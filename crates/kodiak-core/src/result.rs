@@ -8,7 +8,7 @@
 //! {"schema":"kodiak.result.v2","type":"chat","content":"We need more food at the camp."}
 //! {"schema":"kodiak.result.v2","type":"intent","category":"mecp","intent":"mecp.report",
 //!  "data":{"severity":0,"code":"M01","codes":["M01","M07","S01"],"content":"MECP/0/M01 M07 S01"},
-//!  "transcript":"Kodiak mayday injured, broken leg, need water.","classifier":"deterministic/5",
+//!  "transcript":"Kodiak mayday injured, broken leg, need water.","classifier":"deterministic/6",
 //!  "vocabularies":{"contact":"1.3","mecp":"1.9","rch":"1.1"}}
 //! ```
 //!

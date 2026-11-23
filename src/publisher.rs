@@ -865,6 +865,7 @@ impl<'a> Publisher<'a> {
             heading_is_compass: self.config.kodiak.bss_heading_is_compass,
             marker_max_fix_age_s: self.config.kodiak.marker_max_fix_age_s,
             send_chat: self.config.rch.send_chat,
+            chat_header: self.config.rch.chat_header,
             send_intents: self.config.rch.send_intents,
         };
         intents::plan(text, kodiak, &facts)

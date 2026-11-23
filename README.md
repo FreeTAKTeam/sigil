@@ -4,7 +4,7 @@
 
 # R3AKT Sigil
 
-R3AKT Sigil receives analog narrowband FM on an RTL-SDR. It transcribes speech locally, decodes BSS radio IDs and position reports, and can publish to RCH from a persistent LXMF identity for each authorized radio. The default channel is 435.9950 MHz.
+R3AKT Sigil receives analog narrowband FM on an RTL-SDR. It transcribes speech locally, decodes BSS radio IDs and position reports, and can publish to RCH from a persistent LXMF identity for each authorized radio.
 
 See the [BSS radio compatibility matrix](docs/bss-radio-compatibility.md) for verified and prospective radio models, caveats, and the RF acceptance checklist.
 
@@ -20,7 +20,7 @@ $env:R3AKT_IDENTITY_PASSPHRASE = [System.Net.NetworkCredential]::new('', $secure
 
 The passphrase must contain at least 16 bytes. Use a strong unique passphrase and retain it separately from backups. On Linux, provide the same environment variable. Identity and Fabric paths are relative to the TOML file. A gateway configured without RCH still writes correlated events locally. `--bss-only` listens for IDs and locations without loading an ASR model.
 
-Configure the radio to send BSS ID or location on PTT release. Wait for `Listening on 435.9950 MHz` before transmitting. `gateway_*.json` files identify correlated or unresolved voice and independently decoded positions. The managed LXMF source appears in the Fabric journal under `data/fabric/<rch-delivery-hash>`. A transport proof confirms native Reticulum delivery. Verify application ingestion in RCH chat and on the telemetry map.
+Configure the radio to send BSS ID or location on PTT release. Wait for the `Listening on` line before transmitting. `gateway_*.json` files identify correlated or unresolved voice and independently decoded positions. The managed LXMF source appears in the Fabric journal under `data/fabric/<rch-delivery-hash>`. A transport proof confirms native Reticulum delivery. Verify application ingestion in RCH chat and on the telemetry map.
 
 ### Radios and their identities
 
@@ -41,7 +41,7 @@ Start a transmission with "Kodiak" to send a command instead of chat. For exampl
 - "Kodiak, hostile, bearing two seven zero, 800 meters" places a contact marker.
 - "Kodiak, list users" sends RCH's `mission.users` command from the radio's identity.
 
-A command that Kodiak cannot parse completely is ignored, never guessed. MECP and contact reports need a GPS fix from the radio's BSS packets. Set `[rch].send_intents = false` to publish chat only. Read [docs/kodiak.md](docs/kodiak.md) before enabling commands on a live hub, especially its limitations section. An experimental laya model classifier exists behind `--features laya`; it did not beat the rules in testing ([benchmark](docs/kodiak-laya-benchmark.md)), so the rules stay the default. To try the command language without a radio:
+A command that Kodiak cannot parse completely is ignored, never guessed. Contact reports need a GPS fix from the radio's BSS packets; an MECP report carries the fix as telemetry when there is one and is sent without it otherwise. Set `[rch].send_intents = false` to publish chat only. Read [docs/kodiak.md](docs/kodiak.md) before enabling commands on a live hub, especially its limitations section. An optional laya model classifier exists behind `--features laya`; in testing it added only a few recognitions over the rules ([benchmark](docs/kodiak-laya-benchmark.md)), so the rules stay the default. To try the command language without a radio:
 
 ```powershell
 cargo run -p kodiak-intent --example kodiak_text -- "Kodiak hostile three thirty two hundred meters"
@@ -59,14 +59,14 @@ The release executable uses the x64 Visual C++ v14 runtime. [Microsoft Visual C+
 .\target\release\r3akt-sigil.exe listen --save-wav --monitor-power
 ```
 
-Leave the channel idle until the console prints `Listening on 435.9950 MHz`. Each completed transmission goes to a separate inference worker so the receiver can keep capturing. Ctrl+C closes the receiver and drains queued clips. A continuous open carrier is split into clips up to 30 seconds.
+Leave the channel idle until the console prints its `Listening on` line. Each completed transmission goes to a separate inference worker so the receiver can keep capturing. Ctrl+C closes the receiver and drains queued clips. A continuous open carrier is split into clips up to 30 seconds.
 
 JSON files in `transcripts` contain the source, frequency in Hz, UTC timestamps, audio duration and transcript text. An empty text field indicates the recognizer returned no text. `--save-wav` adds a 16 kHz mono PCM file alongside each JSON. Live start and end timestamps track the received carrier. For WAV imports they record the import time.
 
 ### Tune and set gain or squelch
 
 ```powershell
-.\target\release\r3akt-sigil.exe listen --frequency-hz 435995000 --gain-db 29.7 --squelch-dbfs -42 --monitor-power
+.\target\release\r3akt-sigil.exe listen --gain-db 29.7 --squelch-dbfs -42 --monitor-power
 ```
 
 Gain is rounded to the nearest step the tuner supports. By default the listener measures the idle channel for roughly one second and sets the squelch 8 dB above its median level. For manual squelch, use `--monitor-power` to observe idle and active channel levels, then set `--squelch-dbfs` between them. A more negative threshold opens on weaker signals. See `listen --help` for device index and oscillator correction.
@@ -95,7 +95,7 @@ Use the pinned Rust MSVC toolchain, Visual Studio C++ Build Tools with a Windows
 
 ```powershell
 cargo build --release --locked
-cargo test --release --locked
+cargo test --release --locked --workspace
 ```
 
 Windows USB requires the dongle’s SDR interface to expose a working USB driver compatible with libusb. WinUSB is the supported setup for the NESDR. [Nooelec installation guide](https://support.nooelec.com/hc/en-us/articles/360005298053-NESDR-Installation-Guide) · [libusb Windows support](https://github.com/libusb/libusb/wiki/Windows)
@@ -128,7 +128,7 @@ Reload the rules with `sudo udevadm control --reload-rules && sudo udevadm trigg
 
 ## Live acceptance
 
-With the Nooelec connected, start the listener with `--save-wav`. Check that it reports `Tuned RTL-SDR device 0 to 435.9950 MHz (435995000 Hz)`. Once it reports listening, use two known analog NFM voice transmissions on that channel with enough time for the squelch to close in between. Confirm two detection and completion cycles, two readable console transcripts, and two corresponding JSON and WAV pairs in `transcripts`. A WAV test exercises local inference and file output. The live test also exercises USB tuning, RF capture and demodulation.
+With the Nooelec connected, start the listener with `--save-wav`. Check that it reports `Tuned RTL-SDR device 0 to` your channel. Once it reports listening, use two known analog NFM voice transmissions on that channel with enough time for the squelch to close in between. Confirm two detection and completion cycles, two readable console transcripts, and two corresponding JSON and WAV pairs in `transcripts`. A WAV test exercises local inference and file output. The live test also exercises USB tuning, RF capture and demodulation.
 
 ## Legacy REST publisher
 
@@ -149,7 +149,7 @@ In a second PowerShell window, run the receiver as usual.
 
 The publisher watches `transcripts` for completed live JSON files. If the receiver uses `--output-dir`, give the publisher the same directory with `--watch-dir`. On the first watch of a directory, the publisher skips its existing files. Subsequent runs catch up on new files created while the publisher was stopped. The outbox records each live transcript once and ignores blank transcripts and WAV imports.
 
-The message header uses the configured sender label, the actual captured frequency, and the transmission end time in the local timezone. A manual test uses `[radio].frequency_hz` and the current local time. The original speech text follows the header. The publisher sends text through the existing MeshChat-compatible route. [Fabric send handler](https://github.com/FreeTAKTeam/LXMF-rs/blob/008bf9e1cbc2b3f6859abf21f64dfdb87be8621f/crates/libs/meshchat-api/src/chat.rs)
+A chat message is the spoken text alone. Set `[rch].chat_header = true` to start it with the radio name, the captured frequency and the transmission time (UTC). The publisher sends text through the existing MeshChat-compatible route. [Fabric send handler](https://github.com/FreeTAKTeam/LXMF-rs/blob/008bf9e1cbc2b3f6859abf21f64dfdb87be8621f/crates/libs/meshchat-api/src/chat.rs)
 
 ### Submission and recovery
 
@@ -177,17 +177,17 @@ The automated tests exercise the standalone command and automatic publishing aga
 
 ## Receive BSS packets
 
-Set the radio's Digital Channel to the intended frequency and select the BSS format. This VR-N76 is configured for 435.9950 MHz on both voice and data. One SDR receives one channel at a time. Use `--frequency-hz` to select the BSS channel, either with voice on that channel or in BSS-only mode.
+Set the radio's Digital Channel to the intended frequency and select the BSS format. Use the same channel for voice and data. One SDR receives one channel at a time. Use `--frequency-hz` to select the BSS channel, either with voice on that channel or in BSS-only mode.
 
 ```powershell
 # Capture BSS, including a raw discriminator WAV and failed HDLC candidates.
-.\target\release\r3akt-sigil.exe listen --bss-only --frequency-hz 435995000 --gain-db 16.6 --output-dir .\bss-check --bss-diagnostics --bss-capture .\vr-n76-discriminator.wav
+.\target\release\r3akt-sigil.exe listen --bss-only --gain-db 16.6 --output-dir .\bss-check --bss-diagnostics --bss-capture .\vr-n76-discriminator.wav
 
 # Replay the capture after closing the live receiver with Ctrl+C.
-.\target\release\r3akt-sigil.exe bss-wav .\vr-n76-discriminator.wav --frequency-hz 435995000 --output-dir .\bss-replay --bss-diagnostics
+.\target\release\r3akt-sigil.exe bss-wav .\vr-n76-discriminator.wav --output-dir .\bss-replay --bss-diagnostics
 
 # Receive voice and BSS on the same channel with a Parakeet-enabled build.
-.\target\release\r3akt-sigil.exe listen --bss --frequency-hz 435995000 --gain-db 16.6
+.\target\release\r3akt-sigil.exe listen --bss --gain-db 16.6
 ```
 
 `--bss-capture` writes continuous unfiltered mono discriminator audio at 32 kHz. Use a new filename and stop after a short capture for WAV replay. The decoder taps that same audio before speech filtering, de-emphasis and squelch. Combined mode masks recognized BSS intervals before sending the remaining speech to the recognizer. BSS-only mode runs without a speech model.

@@ -252,6 +252,14 @@ fn may_day_consumes_two_words() {
         "May they need water",
     );
     assert_eq!(content(&out), "MECP/0/S01");
+    // "may" without a word that completes "may day" does not swallow the
+    // next word: "injured" would otherwise be lost.
+    let out = classify(
+        Scripted::new(&[("may", 0.95), ("S01", 0.95)]),
+        Mode::LayaOnly,
+        "May injured need water",
+    );
+    assert_eq!(content(&out), "MissingParameter");
 }
 
 #[test]
