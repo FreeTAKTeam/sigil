@@ -241,7 +241,7 @@ In `listen`, the coordinator writes `gateway_*.json` even without `--config` or 
 | `[kodiak].classifier` | `deterministic` | `deterministic` (vocabulary rules) or `laya` (laya typed decisions checked against the rules). `laya` needs a build with `--features laya`. |
 | `[kodiak].laya_checkpoint` | `models/laya/english` | laya checkpoint directory, relative to the TOML file |
 | `[kodiak].laya_threshold` | `0.85` | Minimum calibrated probability for laya to confirm or add an intent. Above 0.5 and at most 1. |
-| `[receiver].antenna` | unset | SDR antenna position, `{ latitude = …, longitude = … }` in decimal degrees. When set, the log shows each BSS packet's distance from the antenna (`BSS sender "Corvo" 116 m from the antenna, saved to …`). Events are unchanged |
+| `[receiver].antenna` | unset | SDR antenna position, `{ latitude = …, longitude = … }` in decimal degrees. When set, the log shows each BSS packet's distance from the antenna (`BSS sender "R4" 116 m from the antenna, saved to …`). Events are unchanged |
 
 ## Identity registry (`identity.rs`)
 

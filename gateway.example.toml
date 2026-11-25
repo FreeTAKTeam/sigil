@@ -8,7 +8,7 @@ trailing_id_gap_ms = 3000
 [identity]
 auto_register = true
 registry_path = "data/identities"
-allowlist = ["Corvo", "BLACKY"]
+allowlist = ["R4", "R5"]
 # Publish speech that carried no BSS ID from a separate gateway identity.
 # It never uses a radio's identity. It has no GPS position: contact reports
 # from it are ignored, and its MECP events are sent without a location.
@@ -52,4 +52,4 @@ laya_threshold = 0.85
 # Optional position of the SDR antenna, in decimal degrees (south and west
 # negative). When set, the log shows how far each BSS packet with a GPS fix
 # was from the antenna. Events are unchanged.
-# antenna = { latitude = 43.966633, longitude = -66.125633 }
+# antenna = { latitude = 51.477800, longitude = -0.001500 }

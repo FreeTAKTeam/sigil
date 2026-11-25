@@ -28,7 +28,7 @@ Sigil signs each radio's messages with that radio's own Reticulum identity, kept
 
 ```powershell
 .\target\release\r3akt-sigil.exe radios --config .\gateway.toml list
-.\target\release\r3akt-sigil.exe radios --config .\gateway.toml import Corvo --identity-file .\corvo.identity --replace
+.\target\release\r3akt-sigil.exe radios --config .\gateway.toml import R4 --identity-file .\r4.identity --replace
 ```
 
 `list` shows each BSS ID with its LXMF address, identity source, last seen time and last position. Run these commands while the gateway is stopped, with `R3AKT_IDENTITY_PASSPHRASE` set. Replacing an identity changes the radio's LXMF address on RCH. An imported identity used at the same time by the operator's own app announces the same address from two places. A registry kept as separate files by earlier versions is converted automatically on first use; the old files are moved to `legacy-files`.
