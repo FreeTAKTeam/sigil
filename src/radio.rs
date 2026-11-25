@@ -41,7 +41,7 @@ pub struct Settings {
     #[arg(long, default_value_t = 0)]
     pub device_index: u32,
     /// Requested tuner gain in dB, rounded to the nearest supported step.
-    #[arg(long, default_value_t = 29.7, allow_negative_numbers = true)]
+    #[arg(long, default_value_t = Self::DEFAULT_GAIN_DB, allow_negative_numbers = true)]
     gain_db: f32,
     /// Channel squelch threshold in dBFS. Omit to calibrate at startup.
     #[arg(long, allow_negative_numbers = true)]
@@ -55,6 +55,19 @@ pub struct Settings {
 }
 
 impl Settings {
+    pub const DEFAULT_GAIN_DB: f32 = 29.7;
+
+    /// Settings for device 0 at a manual gain, with everything else at its default.
+    pub fn at_gain(gain_db: f32) -> Self {
+        Self {
+            device_index: 0,
+            gain_db,
+            squelch_dbfs: None,
+            ppm: 0,
+            monitor_power: false,
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (-10.0..=60.0).contains(&self.gain_db),

@@ -31,6 +31,7 @@ librtlsdr = ["dep:librtlsdr-rs", "dep:rusb"]
 anyhow = "1"
 argon2 = "0.5"
 base64 = "0.22"
+bzip2 = "0.4"
 chacha20poly1305 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4.5", features = ["derive"] }
@@ -59,9 +60,14 @@ sdr-dsp = { git = "https://github.com/jasonherald/rtl-sdr", rev = "4380abf4eb7e7
 sdr-types = { git = "https://github.com/jasonherald/rtl-sdr", rev = "4380abf4eb7e74953623d063477f89f9b47876d6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time"] }
 toml = "0.8"
+toml_edit = "0.22"
+# Downloads the speech model in `setup`. No other command uses the network through it.
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
 yodel = { version = "=0.2.0", default-features = false, features = ["demod", "ax25"] }
 zeroize = "1"
 

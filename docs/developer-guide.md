@@ -30,6 +30,8 @@ This guide explains how the code works, for people changing it. For installing a
 | `src/config.rs` | `gateway.toml` schema and validation |
 | `src/identity.rs` | Encrypted per-radio Reticulum identity registry |
 | `src/radios.rs` | `radios` subcommand: list, add, import and remove registry entries |
+| `src/setup.rs` | `setup` subcommand: the guided first installation |
+| `src/model.rs` | The speech model releases `setup` installs: source, SHA-256 of each file, download and verification |
 | `src/publisher.rs` | Embedded LXMF publisher with a persistent delivery journal |
 | `src/telemetry.rs` | Builds the LXMF telemetry field (`0x02`) for RCH map positions |
 | `crates/kodiak-core` | Kodiak result contract, wake-word gate, `Engine`, `Transcriber` and `IntentClassifier` traits |
@@ -62,6 +64,7 @@ Subcommands:
 
 | Command | What it does |
 |---|---|
+| `setup` | Guided first installation. Checks the model at `--model` against the SHA-256 values in `model.rs` and offers to download a missing one; a model that is present is never replaced. Asks for the frequency and gain and can open the RTL-SDR with them. Asks for the hub and the radios, then writes `--config FILE` (`gateway.toml`). A new file starts from the built-in copy of `gateway.example.toml`; an existing file keeps every setting and comment the wizard did not ask about. It reads answers from standard input, so it can be scripted. It does not handle the identity passphrase. |
 | `listen` | Live receive. Options: `--device-index`, `--gain-db` (29.7), `--squelch-dbfs` (auto-calibrated if omitted), `--ppm`, `--monitor-power`, `--config FILE`, `--bss` or `--bss-only`, `--bss-diagnostics`, `--bss-capture WAV` (closed and finalized after 1,000,000,000 samples, about 8 h 40 min at 32 kHz), `--correlation-timeout-ms` (200–30000), `--trailing-id-gap-ms` (0–10000). |
 | `wav INPUT` | Transcribe one WAV file (8–192 kHz, at most 5 minutes). This bypasses the pipeline and BSS. `--config FILE` uses that file's `[kodiak]` section and wake words; otherwise the defaults. |
 | `bss-wav INPUT` | Decode BSS from a demodulated-audio WAV. It resamples to 16 kHz when Yodel does not support the input rate. It stops with an error at the first event or diagnostic that cannot be saved. |
@@ -322,6 +325,8 @@ The Rust tests are hardware-free and synthesize their own signals:
 | `bss::*` | TLV and location parsing, VR-N76 header, an end-to-end modulated WAV with de-duplication, CRC failure diagnostics and masking |
 | `correlation::*` | Trailing-only attribution, ambiguity, gaps, ID sanitizing |
 | `processing::*` | Carrier-tail masking. Telemetry is not blocked by slow ASR, and the trailing ID is attributed end to end. |
+| `setup::*` | A first setup writes settings that `Config::load` accepts, a local-only setup, answers that are not valid are asked again, a second setup keeps unasked settings and comments, nothing is written without the final yes |
+| `model::*` | An archive installs only its pinned files, a wrong or missing file installs nothing, an altered model is reported, a download over local HTTP |
 | `identity::*` | Distinct keys, lock exclusivity, restart, backup restore, corruption detection |
 | `telemetry::*` | RCH's decoder reads the REM Telemeter encoding back |
 | `publisher::*` | Loopback Reticulum peer receives signed chat and telemetry from two radio identities, plus a Kodiak RCH command as field 9. A rejected Kodiak command is not sent. Identities survive a restart. |
@@ -341,6 +346,7 @@ The Rust tests are hardware-free and synthesize their own signals:
 | RCH telemetry codec | `r3akt-map-core` from `FreeTAKTeam/Reticulum-Community-Hub` @ `82f72e9` |
 | ASR (in `kodiak-asr`) | `whisper-rs` 0.16; `sherpa-onnx` 2.0.2 (optional) |
 | AFSK modem | `yodel` 0.2.0 |
+| Model download (in `setup` only) | `ureq` 2.12 with rustls, `tar`, `bzip2`, `sha2`. `ureq` and `tar` were already build dependencies of `sherpa-onnx-sys`. |
 
 ## Notes for contributors
 

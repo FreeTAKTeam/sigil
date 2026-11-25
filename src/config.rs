@@ -182,7 +182,13 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let contents =
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        let mut config: Self = toml::from_str(&contents).context("read gateway settings")?;
+        Self::parse(&contents, path.parent().unwrap_or_else(|| Path::new(".")))
+    }
+
+    /// Reads and validates settings text. Relative paths in it are resolved
+    /// against `directory`.
+    pub fn parse(contents: &str, directory: &Path) -> Result<Self> {
+        let mut config: Self = toml::from_str(contents).context("read gateway settings")?;
         ensure!(
             (200..=30_000).contains(&config.processing.correlation_timeout_ms),
             "correlation_timeout_ms must be 200–30000"
@@ -217,7 +223,6 @@ impl Config {
                 "[receiver] antenna must be latitude -90..90 and longitude -180..180"
             );
         }
-        let directory = path.parent().unwrap_or_else(|| Path::new("."));
         config.identity.registry_path = directory.join(&config.identity.registry_path);
         config.fabric.local_storage_path = directory.join(&config.fabric.local_storage_path);
         config.kodiak.laya_checkpoint = directory.join(&config.kodiak.laya_checkpoint);
@@ -235,12 +240,7 @@ impl Config {
                 "[identity] allowlist is required with RCH enabled"
             );
             ensure!(
-                config.rch.destination_hash.len() == 32
-                    && config
-                        .rch
-                        .destination_hash
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit()),
+                is_destination_hash(&config.rch.destination_hash),
                 "invalid RCH LXMF destination hash"
             );
             ensure!(
@@ -248,17 +248,28 @@ impl Config {
                 "[fabric] tcp_clients is required with RCH enabled"
             );
             for endpoint in &config.fabric.tcp_clients {
-                let (host, port) = endpoint
-                    .rsplit_once(':')
-                    .context("Fabric endpoint must be host:port")?;
-                ensure!(
-                    !host.is_empty()
-                        && !host.contains(char::is_whitespace)
-                        && port.parse::<u16>().is_ok_and(|port| port > 0),
-                    "invalid Fabric endpoint"
-                );
+                check_endpoint(endpoint)?;
             }
         }
         Ok(config)
     }
+}
+
+/// Whether `text` is an LXMF destination hash: 32 hexadecimal characters.
+pub fn is_destination_hash(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Checks a Fabric TCP endpoint in `host:port` form.
+pub fn check_endpoint(endpoint: &str) -> Result<()> {
+    let (host, port) = endpoint
+        .rsplit_once(':')
+        .context("Fabric endpoint must be host:port")?;
+    ensure!(
+        !host.is_empty()
+            && !host.contains(char::is_whitespace)
+            && port.parse::<u16>().is_ok_and(|port| port > 0),
+        "invalid Fabric endpoint"
+    );
+    Ok(())
 }
