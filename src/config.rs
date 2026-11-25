@@ -158,6 +158,8 @@ pub struct Rch {
     pub enabled: bool,
     pub destination_hash: String,
     pub send_chat: bool,
+    /// Start each chat message with the radio name, frequency and time.
+    pub chat_header: bool,
     pub send_telemetry: bool,
     /// Publish Kodiak MECP reports, contact markers and RCH commands.
     pub send_intents: bool,
@@ -169,6 +171,7 @@ impl Default for Rch {
             enabled: false,
             destination_hash: String::new(),
             send_chat: true,
+            chat_header: false,
             send_telemetry: true,
             send_intents: true,
         }

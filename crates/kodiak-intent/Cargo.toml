@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 publish = false
-license = "GPL-2.0-or-later"
+license = "EPL-2.0"
 description = "R3AKT Kodiak: versioned MECP, contact and RCH vocabularies and intent classifiers"
 repository = "https://github.com/FreeTAKTeam/R3AKT-Kodiak"
 

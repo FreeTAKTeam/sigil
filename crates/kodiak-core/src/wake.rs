@@ -85,28 +85,18 @@ impl WakeWord {
         }
     }
 
-    /// Returns the text that follows the first activation word, or `None` when
-    /// the activation word is absent. The returned command may be empty.
+    /// Returns the text after the activation word when it is the first word
+    /// of `text`, or `None` otherwise: a message that does not start with
+    /// the activation word is chat, even if the word appears later ("I saw a
+    /// kodiak bear"). The returned command may be empty.
     #[must_use]
     pub fn command<'a>(&self, text: &'a str) -> Option<&'a str> {
-        let mut start = None;
-        for (index, character) in text
-            .char_indices()
-            .chain(std::iter::once((text.len(), ' ')))
-        {
-            match (start, character.is_alphanumeric()) {
-                (None, true) => start = Some(index),
-                (Some(from), false) => {
-                    let word = &text[from..index];
-                    if self.is_form(word) {
-                        return Some(&text[index..]);
-                    }
-                    start = None;
-                }
-                _ => {}
-            }
-        }
-        None
+        let start = text.find(char::is_alphanumeric)?;
+        let word = &text[start..];
+        let end = word
+            .find(|c: char| !c.is_alphanumeric())
+            .unwrap_or(word.len());
+        self.is_form(&word[..end]).then(|| &word[end..])
     }
 }
 
@@ -121,7 +111,9 @@ mod tests {
             wake.command("Kodiak. Urgent. Need Food."),
             Some(". Urgent. Need Food.")
         );
-        assert_eq!(wake.command("hey KODIAK, list users"), Some(", list users"));
+        assert_eq!(wake.command("KODIAK, list users"), Some(", list users"));
+        assert_eq!(wake.command("hey Kodiak, list users"), None);
+        assert_eq!(wake.command("I saw a kodiak bear yesterday"), None);
         assert_eq!(wake.command("kodiak"), Some(""));
         assert_eq!(wake.command("Codeiac. Safety."), Some(". Safety."));
         for chat in [

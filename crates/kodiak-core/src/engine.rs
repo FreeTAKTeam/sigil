@@ -234,6 +234,14 @@ impl Asr {
     }
 }
 
+/// Words as the classifiers tokenize them: hyphens and other punctuation
+/// split words, so one long hyphenated "word" cannot bypass the word limit.
+fn word_count(text: &str) -> usize {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .count()
+}
+
 /// The Kodiak engine.
 pub struct Engine {
     wake: WakeWord,
@@ -343,9 +351,9 @@ impl Engine {
     #[must_use]
     pub fn process_text(&self, input: &TextInput) -> KodiakResult {
         let transcript = input.text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let (command, heard, precomputed) = match self.wake.command(&transcript) {
+        let (command, mut heard, mut precomputed) = match self.wake.command(&transcript) {
             Some(command) => (command.to_owned(), None, None),
-            None if transcript.split(' ').count() > self.max_command_words.saturating_add(1) => {
+            None if word_count(&transcript) > self.max_command_words.saturating_add(1) => {
                 return KodiakResult::Chat {
                     content: transcript,
                 };
@@ -363,10 +371,13 @@ impl Engine {
                 }
             },
         };
-        let command = self.wake.strip_leading(&command);
+        let mut command = self.wake.strip_leading(&command).to_owned();
         let classifier = self.classifier.id().to_owned();
         let vocabularies = self.classifier.vocabularies();
-        let words = command.split_whitespace().count();
+        // Count words as the classifiers tokenize them: hyphens and other
+        // punctuation split words, so one long hyphenated "word" cannot
+        // bypass the limit.
+        let words = word_count(&command);
         if words > self.max_command_words {
             return KodiakResult::Rejected {
                 rejection: Rejection::new(
@@ -384,12 +395,28 @@ impl Engine {
                 vocabularies,
             };
         }
+        // A repeated activation word can be misheard too ("Kodiak, Cardiac,
+        // mayday …"). Read as words of the command it could add an event
+        // nobody reported, so the classifier may take it as the activation
+        // word when the rest is a recognized command.
+        let mut repeated = None;
+        if precomputed.is_none()
+            && let Some(Addressed {
+                command: rest,
+                heard: Some(word),
+                classification,
+            }) = self.classifier.addressed(&command, &self.wake)
+        {
+            command = rest;
+            repeated = Some(word);
+            precomputed = classification;
+        }
         let Classification {
             result,
             mut corrections,
             confidence,
-        } = precomputed.unwrap_or_else(|| self.classifier.classify(command));
-        if let Some(heard) = heard {
+        } = precomputed.unwrap_or_else(|| self.classifier.classify(&command));
+        for heard in repeated.into_iter().chain(heard.take()).collect::<Vec<_>>() {
             corrections.insert(
                 0,
                 Correction {

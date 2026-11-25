@@ -3,22 +3,34 @@
 //! Sigil owns everything Kodiak deliberately does not know: the radio's
 //! position and heading, the RCH wire format, and the publishing policy.
 //!
-//! - Chat is sent as an ordinary LXMF chat message.
-//! - MECP reports become an RCH mission log entry
+//! Sigil publishes four types of message, the ones REM and RCH distinguish
+//! ([`MessageType`]):
+//!
+//! - **Presence**: the radio's own position, as Sideband-compatible telemetry
+//!   (LXMF field `0x02`). It comes only from BSS position packets and is
+//!   built in `telemetry`, not here.
+//! - **Chat**: the spoken text, as an ordinary LXMF chat message.
+//! - **Event**: an MECP report, as an RCH mission log entry
 //!   (`mission.registry.log_entry.upsert`) whose content is the MECP message
-//!   exactly as Kodiak encoded it. When the radio has a fix, the same LXMF
-//!   message also carries the radio's position as telemetry (field `0x02`),
-//!   so RCH and REM can place the event on the map. Without a fix the report
-//!   is still sent, without telemetry.
-//! - Contact reports become an RCH map marker (`mission.marker.create`) at the
-//!   computed contact position.
-//! - RCH commands are sent unchanged as RCH field commands from the radio's
-//!   own identity, so RCH's dispatcher and authorization decide the outcome.
-//! - Rejections are never sent.
+//!   exactly as Kodiak encoded it. An event may carry a location: when the
+//!   radio has a fix, it is the entry's own `latitude` and `longitude`, the
+//!   arguments RCH stores as the event position and relays to REM. Without a
+//!   fix the event is sent without a location. An event never carries
+//!   presence telemetry.
+//! - **Marker**: a contact report, as a map marker at the computed contact
+//!   position. The message is built as REM builds its own markers, with
+//!   `r3akt-map-core`'s `marker_wire::encode_fields`: the RCH command
+//!   (`mission.marker.create`) in field `0x09`, the marker replica for REM in
+//!   field `0x0D` and the Sideband-compatible object in field `0x03`.
+//!
+//! RCH commands ("list users") are not one of the four: they are sent
+//! unchanged as RCH field commands from the radio's own identity, so RCH's
+//! dispatcher and authorization decide the outcome. Rejections are never
+//! sent.
 //!
 //! Position rule: use the GPS fix from this transmission's BSS packet,
 //! otherwise the radio's last valid fix. With no fix ever received, contact
-//! reports are ignored locally and MECP reports go out without telemetry. A
+//! reports are ignored locally and events go out without a location. A
 //! contact marker also ignores a last fix older than the configured age,
 //! since the operator may have moved.
 //!
@@ -29,27 +41,60 @@
 
 use std::fmt::Write as _;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
 use kodiak_core::{Affiliation, ContactReport, Direction, Intent, KodiakResult};
 use lxmf_core::constants::FIELD_COMMANDS;
+use r3akt_map_core::{MarkerDraft, MarkerRecord, marker, marker_wire, time::iso8601_from_unix_ms};
 use rns_transport::hash::AddressHash;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::bss::Position;
 use crate::output::frequency_label;
-use crate::telemetry;
 
 /// Mean Earth radius in metres (IUGG).
 pub const EARTH_RADIUS_M: f64 = 6_371_008.8;
+
+/// The types of message Sigil publishes, as REM and RCH distinguish them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageType {
+    /// The radio's own position, as telemetry.
+    Presence,
+    /// Spoken text.
+    Chat,
+    /// An MECP report; it may carry a location.
+    Event,
+    /// A location on the map.
+    Marker,
+    /// An RCH command passed through unchanged.
+    Command,
+}
+
+impl MessageType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Presence => "presence",
+            Self::Chat => "chat",
+            Self::Event => "event",
+            Self::Marker => "marker",
+            Self::Command => "command",
+        }
+    }
+}
 
 /// What the publisher should do with one transcript event.
 #[derive(Debug, PartialEq)]
 pub enum Plan {
     /// Send an ordinary chat message.
     Chat(String),
-    /// Send an RCH field command, with a human-readable body.
-    Command { body: String, fields: Vec<u8> },
+    /// Send an event: an RCH mission log entry, with a human-readable body.
+    Event { body: String, fields: Vec<u8> },
+    /// Send a map marker, with a human-readable body.
+    Marker { body: String, fields: Vec<u8> },
+    /// Send an RCH field command unchanged.
+    Command { fields: Vec<u8> },
     /// Do not send; record why.
     Ignore(String),
     /// Nothing to send under the configured policy.
@@ -57,8 +102,14 @@ pub enum Plan {
 }
 
 /// Facts about the transmission that only Sigil knows.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent publishing switches"
+)]
 pub struct Context<'a> {
     pub radio_name: &'a str,
+    /// The sending radio's Reticulum identity hash, in hex.
+    pub source_identity: &'a str,
     pub event_id: &'a str,
     pub frequency_hz: u32,
     pub timestamp: DateTime<Utc>,
@@ -72,16 +123,16 @@ pub struct Context<'a> {
     /// Oldest last-known fix a contact marker may use, in seconds.
     pub marker_max_fix_age_s: u64,
     pub send_chat: bool,
+    /// Start chat messages with the radio name, frequency and time.
+    pub chat_header: bool,
     pub send_intents: bool,
 }
 
 impl Context<'_> {
-    /// The radio's fix and when it was received: this transmission's fix,
-    /// otherwise the last valid one.
-    fn fix(&self) -> Option<(Position, DateTime<Utc>)> {
+    /// The radio's fix: this transmission's, otherwise the last valid one.
+    fn fix(&self) -> Option<Position> {
         self.current
-            .map(|position| (position, self.timestamp))
-            .or(self.last_known)
+            .or(self.last_known.map(|(position, _)| position))
     }
 
     /// The observer's position for a contact marker: the current fix, or a
@@ -106,6 +157,9 @@ impl Context<'_> {
     fn chat(&self, text: &str) -> Plan {
         if !self.send_chat {
             return Plan::Nothing;
+        }
+        if !self.chat_header {
+            return Plan::Chat(text.to_owned());
         }
         Plan::Chat(format!(
             "Radio: {}\nFrequency: {}\nTime: {}\n\n{text}",
@@ -135,17 +189,23 @@ pub fn plan(text: &str, result: Option<&KodiakResult>, context: &Context<'_>) ->
     };
     match intent {
         Intent::MecpReport(report) => {
-            let mut fields = vec![command_field(
-                "mission.registry.log_entry.upsert",
-                &json!({ "content": report.content }),
-                context.event_id,
-            )?];
-            if let Some((position, received_at)) = context.fix() {
-                fields.push(telemetry::field(position, received_at)?);
+            let mut args = json!({ "content": report.content });
+            // RCH stores `latitude` and `longitude` as the event position
+            // (`r3akt-rch-core` `log_entry_position`), relays them to REM
+            // and rejects the command if either is out of range.
+            if let Some(position) = context.fix()
+                && marker::Position::new(position.latitude, position.longitude).is_ok()
+            {
+                args["latitude"] = json!(position.latitude);
+                args["longitude"] = json!(position.longitude);
             }
-            Ok(Plan::Command {
+            Ok(Plan::Event {
                 body: report.content.clone(),
-                fields: encode_fields(fields)?,
+                fields: command_fields(
+                    "mission.registry.log_entry.upsert",
+                    &args,
+                    context.event_id,
+                )?,
             })
         }
         Intent::ContactReport(report) => contact(report, text, context),
@@ -155,10 +215,7 @@ pub fn plan(text: &str, result: Option<&KodiakResult>, context: &Context<'_>) ->
                 &json!(command.arguments),
                 context.event_id,
             )?;
-            Ok(Plan::Command {
-                body: String::new(),
-                fields,
-            })
+            Ok(Plan::Command { fields })
         }
     }
 }
@@ -221,22 +278,57 @@ fn contact(report: &ContactReport, text: &str, context: &Context<'_>) -> Result<
     if let Some(activity) = &report.activity {
         let _ = write!(notes, " Activity: {activity}.");
     }
-    let args = json!({
-        // Deterministic, so a replayed event cannot create a second marker.
-        "object_destination_hash": AddressHash::new_from_slice(context.event_id.as_bytes()).to_hex_string(),
-        "marker_type": symbol,
-        "symbol": symbol,
-        "name": name,
-        "category": "contact",
-        "lat": latitude,
-        "lon": longitude,
-        "notes": notes,
-    });
-    let fields = command_fields("mission.marker.create", &args, context.event_id)?;
-    Ok(Plan::Command {
-        body: format!("Map marker created: {name}"),
-        fields,
+    let position = marker::Position::new(latitude, longitude)
+        .map_err(|error| anyhow!("contact position: {error}"))?;
+    // Deterministic, so a replayed event cannot create a second marker.
+    let object = AddressHash::new_from_slice(context.event_id.as_bytes()).to_hex_string();
+    let created_ms = context.timestamp.timestamp_millis();
+    let record = MarkerRecord::create_with_id(
+        MarkerDraft {
+            marker_type: symbol.into(),
+            symbol: symbol.into(),
+            name,
+            category: "contact".into(),
+            position,
+            notes: Some(notes),
+            origin_rch: String::new(),
+        },
+        object.clone(),
+        object,
+        created_ms,
+    );
+    Ok(Plan::Marker {
+        body: format!("Map marker created: {}", record.name),
+        fields: marker_created_fields(&record, context)?,
     })
+}
+
+/// The LXMF fields REM sends for a marker it creates (`reticulum_mobile`
+/// `map_marker_replication_payload`): the RCH command and the replica.
+fn marker_created_fields(record: &MarkerRecord, context: &Context<'_>) -> Result<Vec<u8>> {
+    let command = json!({
+        "command_id": context.event_id,
+        "command_type": "mission.marker.create",
+        "timestamp": iso8601_from_unix_ms(record.created_ts_ms),
+        "source": { "rns_identity": context.source_identity },
+        "args": {
+            "object_destination_hash": record.object_destination_hash,
+            "marker_type": record.marker_type,
+            "symbol": record.symbol,
+            "name": record.name,
+            "category": record.category,
+            "lat": record.lat,
+            "lon": record.lon,
+            "notes": record.notes,
+        },
+    });
+    marker_wire::encode_fields(
+        "mission.marker.created",
+        record,
+        context.source_identity,
+        Some(&json!([command])),
+    )
+    .map_err(|error| anyhow!("encode map marker: {error}"))
 }
 
 /// Great-circle destination from a start point, bearing and distance.
@@ -290,6 +382,7 @@ mod tests {
     use super::*;
 
     const ID: &str = "voice-20261121T100000Z-42";
+    const IDENTITY: &str = "00112233445566778899aabbccddeeff";
 
     fn now() -> DateTime<Utc> {
         DateTime::from_timestamp(1_800_000_000, 0).unwrap()
@@ -302,6 +395,7 @@ mod tests {
     ) -> Context<'static> {
         Context {
             radio_name: "R4",
+            source_identity: IDENTITY,
             event_id: ID,
             frequency_hz: 435_995_000,
             timestamp: now(),
@@ -311,6 +405,7 @@ mod tests {
             heading_is_compass: compass,
             marker_max_fix_age_s: 300,
             send_chat: true,
+            chat_header: false,
             send_intents: true,
         }
     }
@@ -343,16 +438,15 @@ mod tests {
         }
     }
 
+    /// One LXMF field of a planned message, as JSON.
+    fn field(plan: &Plan, number: u64) -> serde_json::Value {
+        let bytes = rmp_serde::to_vec(&fields(plan)[&number]).unwrap();
+        rmp_serde::from_slice(&bytes).unwrap()
+    }
+
+    /// The RCH command in field `0x09`.
     fn command(plan: &Plan) -> serde_json::Value {
-        let Plan::Command { fields, .. } = plan else {
-            panic!("expected a command, got {plan:?}");
-        };
-        let map = rmpv::decode::read_value(&mut fields.as_slice()).unwrap();
-        let (key, value) = &map.as_map().unwrap()[0];
-        assert_eq!(key.as_u64(), Some(9));
-        let bytes = rmp_serde::to_vec(value).unwrap();
-        let entries: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
-        entries[0].clone()
+        field(plan, 9)[0].clone()
     }
 
     fn contact_report(direction: Direction) -> KodiakResult {
@@ -381,10 +475,18 @@ mod tests {
 
     #[test]
     fn chat_and_rejections() {
-        let ctx = context(None, None, false);
-        assert!(
-            matches!(plan("hello", None, &ctx).unwrap(), Plan::Chat(body) if body.ends_with("\n\nhello"))
+        let mut ctx = context(None, None, false);
+        // By default the chat message is the spoken text alone.
+        assert_eq!(
+            plan("hello", None, &ctx).unwrap(),
+            Plan::Chat("hello".into())
         );
+        ctx.chat_header = true;
+        assert!(matches!(
+            plan("hello", None, &ctx).unwrap(),
+            Plan::Chat(body) if body.starts_with("Radio: R4\nFrequency: ") && body.ends_with("\n\nhello")
+        ));
+        ctx.chat_header = false;
         let rejected = KodiakResult::Rejected {
             rejection: Rejection::new(RejectReason::NoIntent, None, "no intent"),
             transcript: "Kodiak launch".into(),
@@ -399,10 +501,12 @@ mod tests {
         ));
     }
 
-    /// The fields of a planned command, by field number.
+    /// The fields of a planned message, by field number.
     fn fields(plan: &Plan) -> BTreeMap<u64, rmpv::Value> {
-        let Plan::Command { fields, .. } = plan else {
-            panic!("expected a command, got {plan:?}");
+        let (Plan::Event { fields, .. } | Plan::Marker { fields, .. } | Plan::Command { fields }) =
+            plan
+        else {
+            panic!("expected fields, got {plan:?}");
         };
         let map = rmpv::decode::read_value(&mut fields.as_slice()).unwrap();
         map.as_map()
@@ -412,53 +516,41 @@ mod tests {
             .collect()
     }
 
-    /// The decoded telemetry in field `0x02`.
-    fn telemetry_of(plan: &Plan) -> serde_json::Value {
-        use base64::Engine as _;
-        let fields = fields(plan);
-        let packed = fields[&2].as_slice().expect("telemetry must be binary");
-        r3akt_map_core::telemetry::decode_field(&json!(
-            base64::engine::general_purpose::STANDARD.encode(packed)
-        ))
-        .unwrap()
-        .telemetry
-    }
-
     #[test]
-    fn mecp_is_sent_unchanged_with_the_fix_as_telemetry_in_the_same_message() {
+    fn an_event_carries_its_own_location_and_no_presence_telemetry() {
         let report = intent(Intent::MecpReport(MecpReport::single(1, "S02").unwrap()));
         let current = Some(fix(40.0, -75.0, None));
         let last = Some(fix(41.0, -74.0, None));
 
         let sent = plan("", Some(&report), &context(current, last, false)).unwrap();
-        assert!(matches!(&sent, Plan::Command { body, .. } if body == "MECP/1/S02"));
-        assert_eq!(fields(&sent).keys().copied().collect::<Vec<_>>(), [2, 9]);
-        let entry = command(&sent);
-        assert_eq!(entry["command_type"], "mission.registry.log_entry.upsert");
-        assert_eq!(entry["command_id"], ID);
-        assert_eq!(entry["args"]["content"], "MECP/1/S02");
-        let telemetry = telemetry_of(&sent);
-        assert_eq!(telemetry["location"]["latitude"], 40.0);
-        assert_eq!(telemetry["location"]["longitude"], -75.0);
-        assert_eq!(
-            telemetry["location"]["last_update_timestamp"].as_f64(),
-            Some(1_800_000_000.0)
-        );
-
-        // The last fix, stamped with when it was received.
-        let sent = plan("", Some(&report), &context(None, last, false)).unwrap();
-        assert_eq!(command(&sent)["args"]["content"], "MECP/1/S02");
-        let telemetry = telemetry_of(&sent);
-        assert_eq!(telemetry["location"]["latitude"], 41.0);
-        assert_eq!(
-            telemetry["location"]["last_update_timestamp"].as_f64(),
-            Some(1_800_000_000.0 - 60.0)
-        );
-
-        // No fix at all: still sent, with field 9 only.
-        let sent = plan("", Some(&report), &context(None, None, false)).unwrap();
+        assert!(matches!(&sent, Plan::Event { body, .. } if body == "MECP/1/S02"));
+        // The command only: no telemetry field, which would be presence.
         assert_eq!(fields(&sent).keys().copied().collect::<Vec<_>>(), [9]);
-        assert_eq!(command(&sent)["args"]["content"], "MECP/1/S02");
+        assert_eq!(
+            command(&sent),
+            json!({
+                "command_id": ID,
+                "command_type": "mission.registry.log_entry.upsert",
+                "args": { "content": "MECP/1/S02", "latitude": 40.0, "longitude": -75.0 },
+            })
+        );
+
+        // Without a fix in this transmission: the radio's last valid fix.
+        let sent = plan("", Some(&report), &context(None, last, false)).unwrap();
+        let args = &command(&sent)["args"];
+        assert_eq!(
+            (&args["latitude"], &args["longitude"]),
+            (&json!(41.0), &json!(-74.0))
+        );
+
+        // No fix at all: the event is still sent, without a location.
+        let sent = plan("", Some(&report), &context(None, None, false)).unwrap();
+        assert_eq!(command(&sent)["args"], json!({ "content": "MECP/1/S02" }));
+
+        // RCH rejects a position out of range, so it is left out.
+        let invalid = Some(fix(91.0, 0.0, None));
+        let sent = plan("", Some(&report), &context(invalid, None, false)).unwrap();
+        assert_eq!(command(&sent)["args"], json!({ "content": "MECP/1/S02" }));
     }
 
     /// How LXMF would deliver `plan` over a link, by its own rule
@@ -466,8 +558,8 @@ mod tests {
     fn link_representation(plan: &Plan) -> lxmf_core::message::MessageMethod {
         use lxmf_core::constants::{DESTINATION_LENGTH, LXMF_OVERHEAD, SIGNATURE_LENGTH};
         use lxmf_core::message::{Payload, TransportMethod, decide_delivery};
-        let Plan::Command { body, fields } = plan else {
-            panic!("expected a command, got {plan:?}");
+        let Plan::Event { body, fields } = plan else {
+            panic!("expected an event, got {plan:?}");
         };
         let fields = rmpv::decode::read_value(&mut fields.as_slice()).unwrap();
         let payload = Payload::new(
@@ -486,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn mecp_reports_with_telemetry_fit_one_link_packet() {
+    fn events_with_a_location_fit_one_link_packet() {
         use lxmf_core::message::MessageMethod;
         let full = Position {
             latitude: -43.966_633,
@@ -534,8 +626,8 @@ mod tests {
             command(&sent)["args"]["content"],
             "MECP/0/M01 S01 3pax ~BRAVO-6"
         );
-        assert_eq!(telemetry_of(&sent)["location"]["latitude"], 40.0);
-        // Spoken coordinates stay in the text; the fix goes in telemetry.
+        assert_eq!(command(&sent)["args"]["latitude"], 40.0);
+        // Spoken coordinates stay in the text; the fix is the event position.
         let report = spoken(MecpParameters {
             coordinates: Some(Coordinates {
                 latitude: 45.5,
@@ -548,7 +640,7 @@ mod tests {
             command(&sent)["args"]["content"],
             "MECP/0/M01 S01 45.5,-73.25"
         );
-        assert_eq!(telemetry_of(&sent)["location"]["longitude"], -75.0);
+        assert_eq!(command(&sent)["args"]["longitude"], -75.0);
         // The text is never lengthened, so a long report is still sent.
         let report = spoken(MecpParameters {
             text: Some("x".repeat(170)),
@@ -556,7 +648,7 @@ mod tests {
         });
         assert!(matches!(
             plan("", Some(&report), &context(fix, None, false)).unwrap(),
-            Plan::Command { .. }
+            Plan::Event { .. }
         ));
     }
 
@@ -575,7 +667,7 @@ mod tests {
         // A recent stored fix is enough for an absolute bearing.
         assert!(matches!(
             plan("", Some(&bearing), &context(None, stored, false)).unwrap(),
-            Plan::Command { .. }
+            Plan::Marker { .. }
         ));
         // A stale stored fix is not.
         let mut old = context(None, stored, false);
@@ -609,7 +701,33 @@ mod tests {
             Plan::Ignore(_)
         ));
         // Heading 0 + 3 o'clock = due east.
-        let entry = command(&plan("t", Some(&clock), &context(observer, None, true)).unwrap());
+        let sent = plan("t", Some(&clock), &context(observer, None, true)).unwrap();
+        assert!(
+            matches!(&sent, Plan::Marker { body, .. } if body == "Map marker created: Hostile vehicle x2")
+        );
+        // As REM sends a marker: the Sideband object, the RCH command and
+        // the replica for REM.
+        assert_eq!(
+            fields(&sent).keys().copied().collect::<Vec<_>>(),
+            [3, 9, 13]
+        );
+        let entry = command(&sent);
+        assert_eq!(entry["command_id"], ID);
+        assert_eq!(entry["source"], json!({ "rns_identity": IDENTITY }));
+        assert_eq!(entry["timestamp"], "2027-01-15T08:00:00Z");
+        let replica = field(&sent, 13);
+        assert_eq!(replica["event_type"], "mission.marker.created");
+        assert_eq!(replica["source"], json!({ "rns_identity": IDENTITY }));
+        // RCH and REM read the replica with this function.
+        let marker = r3akt_map_core::replica::from_api_value(&replica["payload"], String::new())
+            .expect("a valid marker replica");
+        assert_eq!(marker.name, "Hostile vehicle x2");
+        assert_eq!(marker.symbol, "hostile");
+        assert_eq!(
+            json!(marker.object_destination_hash),
+            entry["args"]["object_destination_hash"]
+        );
+        assert_eq!(json!(marker.lon), entry["args"]["lon"]);
         assert_eq!(entry["command_type"], "mission.marker.create");
         assert_eq!(entry["args"]["symbol"], "hostile");
         assert_eq!(entry["args"]["name"], "Hostile vehicle x2");

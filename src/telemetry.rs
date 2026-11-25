@@ -6,25 +6,23 @@ use rmpv::Value;
 
 use crate::bss::Position;
 
-/// LXMF fields `{2: <telemetry>}` as `MessagePack`.
-pub fn fields(pos: Position, received_at: DateTime<Utc>) -> Result<Vec<u8>> {
-    let map = Value::Map(vec![field(pos, received_at)?]);
-    let mut fields = Vec::new();
-    rmpv::encode::write_value(&mut fields, &map)?;
-    Ok(fields)
-}
-
-/// The telemetry field `(0x02, <packed Telemeter>)`, to combine with other
-/// fields in one LXMF message.
+/// The radio's presence: LXMF fields `{2: <packed Telemeter>}` as
+/// `MessagePack`.
 ///
-/// Encoded exactly as REM encodes a position (`reticulum_mobile`
-/// `telemeter::encode_position`): `r3akt-map-core`'s Telemeter encoder with
-/// the time and location sensors, and 0 for readings the radio did not send.
-/// BSS reports speed in km/h, the unit of the Telemeter wire. BSS carries no
-/// fix time, so both times are when the gateway received the fix.
-pub fn field(pos: Position, received_at: DateTime<Utc>) -> Result<(Value, Value)> {
+/// The time and location sensors are encoded as REM encodes a position
+/// (`reticulum_mobile` `telemeter::encode_position`), with `r3akt-map-core`'s
+/// Telemeter encoder and 0 for readings the radio did not send. BSS reports
+/// speed in km/h, the unit of the Telemeter wire. BSS carries no fix time,
+/// so both times are when the gateway received the fix.
+///
+/// The radio's name goes in Sideband's Information sensor, through the same
+/// encoder. RCH stores no name with telemetry received over LXMF, and its
+/// web map labels such a position from this sensor, or else with the
+/// sender's address (RCH `ui/src/stores/telemetry.ts`).
+pub fn fields(pos: Position, received_at: DateTime<Utc>, name: &str) -> Result<Vec<u8>> {
     let seconds = u64::try_from(received_at.timestamp())?;
-    let packed = telemetry_encode::encode(
+    let name = name.trim();
+    let packed = telemetry_encode::encode_with_information(
         seconds,
         Some(Location {
             latitude: pos.latitude,
@@ -39,9 +37,13 @@ pub fn field(pos: Position, received_at: DateTime<Utc>) -> Result<(Value, Value)
             updated_at_s: seconds,
         }),
         None,
+        (!name.is_empty()).then_some(name),
     )
     .map_err(|e| anyhow!(e))?;
-    Ok((Value::from(FIELD_TELEMETRY), Value::Binary(packed)))
+    let map = Value::Map(vec![(Value::from(FIELD_TELEMETRY), Value::Binary(packed))]);
+    let mut fields = Vec::new();
+    rmpv::encode::write_value(&mut fields, &map)?;
+    Ok(fields)
 }
 
 #[cfg(test)]
@@ -53,7 +55,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn rch_reads_the_rem_telemeter_encoding() -> Result<()> {
+    fn rch_reads_the_position_and_the_radio_name() -> Result<()> {
         let position = Position {
             latitude: 40.0,
             longitude: -75.0,
@@ -62,10 +64,14 @@ mod tests {
             heading_deg: Some(354),
         };
         let at = DateTime::from_timestamp(1_700_000_001, 0).unwrap();
-        let fields = fields(position, at)?;
-        let map = rmpv::decode::read_value(&mut fields.as_slice())?;
-        let bytes = map.as_map().unwrap()[0].1.as_slice().unwrap();
-        let data = decode_field(&json!(STANDARD.encode(bytes))).map_err(|e| anyhow!(e))?;
+        let decode = |fields: Vec<u8>| -> Result<_> {
+            let map = rmpv::decode::read_value(&mut fields.as_slice())?;
+            let bytes = map.as_map().unwrap()[0].1.as_slice().unwrap().to_vec();
+            decode_field(&json!(STANDARD.encode(bytes))).map_err(|e| anyhow!(e))
+        };
+        let data = decode(fields(position, at, " Corvo ")?)?;
+        // What RCH's web map shows as the label of this position.
+        assert_eq!(data.telemetry["information"]["contents"], "Corvo");
         let location = &data.telemetry["location"];
         assert_eq!(location["latitude"], 40.0);
         assert_eq!(location["longitude"], -75.0);
@@ -73,6 +79,10 @@ mod tests {
         assert_eq!(location["bearing"], 354.0);
         assert_eq!(location["last_update_timestamp"], 1_700_000_001.0);
         assert_eq!(data.timestamp_s, Some(1_700_000_001));
+        // Without a name the Information sensor is left out.
+        let unnamed = decode(fields(position, at, "")?)?;
+        assert!(unnamed.telemetry.get("information").is_none());
+        assert_eq!(unnamed.telemetry["location"], data.telemetry["location"]);
         Ok(())
     }
 }

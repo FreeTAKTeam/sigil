@@ -5,6 +5,6 @@ Rust port of Laya (https://github.com/NandhaKishorM/laya).
 The laya checkpoints (https://huggingface.co/convaiinnovations/laya) are not
 distributed with Kodiak; they are downloaded separately under their own terms.
 
-kodiak-laya itself is GPL-2.0-or-later. The Apache License 2.0 is compatible
-with GPL version 3 but not version 2, so a binary that links laya-candle is
-distributed under the terms of GPL version 3 or later.
+kodiak-laya itself is licensed under the Eclipse Public License 2.0
+(EPL-2.0). laya-candle keeps its Apache License 2.0 in any binary that
+links both.

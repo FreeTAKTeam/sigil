@@ -74,7 +74,7 @@
 {"text": "Kodiak", "expect": {"type": "rejected", "reason": "no_intent"}}
 {"text": "The Kodiaks are moving to the ridge.", "expect": {"type": "chat"}}
 {"text": "Urgent need water at the north gate.", "expect": {"type": "chat"}}
-{"text": "Hey Kodiak, list users", "expect": {"type": "intent", "intent": "mission.users"}}
+{"text": "Hey Kodiak, list users", "expect": {"type": "chat"}}
 {"text": "Kodiak Hostel 330 200 meters", "expect": {"type": "intent", "data": {"affiliation": "hostile", "relative_bearing_deg": 105, "distance_m": 200}}}
 {"text": "Kodiak hostile 1030 1.5 km", "expect": {"type": "intent", "data": {"relative_bearing_deg": 315, "distance_m": 1500}}}
 {"text": "Kodiak hostile 1200 meters", "expect": {"type": "rejected", "category": "marker", "reason": "missing_parameter"}}

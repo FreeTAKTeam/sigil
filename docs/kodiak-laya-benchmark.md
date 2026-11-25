@@ -11,14 +11,14 @@ This page records whether [laya-candle](https://github.com/Trystan-SA/laya-candl
 The `laya/1` questions asked laya abstract judgements about the whole transcript. Examples: "is this addressed to Kodiak?", "what kind of message is this?" and "which topic?". Probing showed that laya is weak at these, but very good at **literal word identity**. So `laya/2` follows the operator's flow and asks laya only that kind of question, each about the part of the message it concerns.
 
 1. **Is the first word Kodiak?**
-   - This step is **deterministic**: edit distance ≤ 3 to "kodiak", for words of 4 letters or more.
+   - This step is **deterministic**: at most three edits from the configured activation word, for words of 4 letters or more. Since `deterministic/5` the check is sound-aware, and since `deterministic/6` an exact activation word also counts only as the first word: letters that sound alike over radio (c/k, a/o, …) cost half an edit, and it lives in `kodiak_intent::first_word_wake`, shared by both classifiers.
    - laya cannot do this. Its state was just the word, and questions asked whether it is "the name Kodiak or a word that sounds like it". On english, almost every word scored about 0.8 "similar" to Kodiak: "Pass", "Hey" and "Bronto" as well as "Kardiac". Multilingual put "Koala" (0.99) and "Radiac" (0.92) above "Podax" (0.46). Only the exact spelling was reliable.
    - A misheard first word only counts when the rest of the message is a recognized command. Otherwise the transcript stays chat.
 2. **Not Kodiak:** chat.
 3. **Kodiak:** read the rest of the message.
    - **MECP** when the first word is a severity:
      - laya is asked "Which word is `word`?", with `word` set to that word alone.
-     - There is one option per spoken form: mayday, may (of "may day" or "may they"), urgent, urgently, safety, routine, normal, other. Since MECP revision 9 there are ten spoken forms (made, medei and urging added), asked as two questions of five.
+     - There is one option per spoken form: mayday, may (of "may day" or "may they"), urgent, urgently, safety, routine, normal, other. Since MECP revision 9 there are ten spoken forms (made, medei and urging added), asked as two questions of five. The results below were measured with the earlier single question of eight forms.
      - Probabilities of forms with the same level are summed.
      - The event is then read from the text after the severity word.
    - **Contact report** (affiliation, direction, distance): these are values, so the deterministic parser decides. Yes/no questions to laya ("does it give a distance?") reached only 0.3–0.8 on real contact reports.
