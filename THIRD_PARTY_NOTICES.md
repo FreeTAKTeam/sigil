@@ -11,7 +11,7 @@ R3AKT Sigil, including the Kodiak packages under `crates/`, is licensed under EP
 | Sherpa-ONNX 2.0.2 | `sherpa-onnx` and `sherpa-onnx-sys` crates; Parakeet builds download the prebuilt `sherpa-onnx-c-api` library from the [Sherpa-ONNX releases](https://github.com/k2-fsa/sherpa-onnx/releases) and ship it next to the executable | Apache-2.0 | `sherpa-onnx-2.0.2/Cargo.toml` and `LICENSE`; `sherpa-onnx-sys-2.0.2/Cargo.toml` and `LICENSE` |
 | ONNX Runtime | Shipped inside the same Sherpa-ONNX prebuilt archive (`onnxruntime.dll` and `onnxruntime_providers_shared.dll` on Windows, `libonnxruntime*.so*` on Linux), in Parakeet builds only | Not recorded here; see the ONNX Runtime project by Microsoft | — |
 
-## Models (not part of the bundles unless added with `-ModelPath` or a model argument)
+## Models (not part of the bundles unless added with `-ModelPath` or a model argument; `setup` downloads them from the source listed here)
 
 | Model | Source | Licence | Read from |
 |---|---|---|---|

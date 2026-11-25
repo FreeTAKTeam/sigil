@@ -8,9 +8,24 @@ R3AKT Sigil receives analog narrowband FM on an RTL-SDR. It transcribes speech l
 
 See the [BSS radio compatibility matrix](docs/bss-radio-compatibility.md) for verified and prospective radio models, caveats, and the RF acceptance checklist.
 
+## Set up with the wizard
+
+Run `setup` from the folder that holds the executable. It asks a few questions and does the first installation:
+
+```powershell
+.3akt-sigil.exe setup
+```
+
+1. **Speech model.** It looks for the model and, if you agree, downloads it from its publisher (482 MB for Parakeet). Each file is checked against a SHA-256 fixed in the executable before it is installed. A model that is already there is checked and never replaced.
+2. **Receiver.** It asks for the frequency and tuner gain and can open the RTL-SDR with them to confirm the driver works.
+3. **Hub and radios.** It asks whether to publish to an RCH hub, for the hub's LXMF delivery hash and Reticulum TCP interfaces, and for the BSS IDs of your radios. Kodiak voice commands stay off unless you turn them on.
+4. **Settings.** It writes `gateway.toml` (or the file given with `--config`) and prints the command that starts the gateway. Run on an existing file, it changes only what it asked about.
+
+The wizard never asks for the identity passphrase; it prints how to set it. A computer without internet access needs the model copied to `models/` by hand, or a bundle built with `-ModelPath`. Use `--backend whisper setup` to install the Whisper model instead.
+
 ## Run the embedded gateway
 
-Copy `gateway.example.toml` to `gateway.toml`. Set `[identity].allowlist` to the radios you operate, `[fabric].tcp_clients` to your Reticulum TCP interfaces, and `[rch].destination_hash` to the hub’s LXMF delivery hash. Set `[rch].enabled = true` after checking the recipient. `[identity].auto_register` permits the first registration of allowlisted radios.
+To write the settings by hand, copy `gateway.example.toml` to `gateway.toml`. Set `[identity].allowlist` to the radios you operate, `[fabric].tcp_clients` to your Reticulum TCP interfaces, and `[rch].destination_hash` to the hub’s LXMF delivery hash. Set `[rch].enabled = true` after checking the recipient. `[identity].auto_register` permits the first registration of allowlisted radios.
 
 ```powershell
 $secure = Read-Host 'Identity registry passphrase' -AsSecureString
@@ -51,7 +66,7 @@ The [gateway architecture](docs/architecture.md) covers event correlation, recov
 
 ## Run on Windows
 
-Run these commands from the project directory. Speech is recognized offline with NVIDIA Parakeet TDT v2 (English, 0.6B parameters, INT8) through Sherpa-ONNX. Extract the model to `models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8`, which contains `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt`, or pass its directory with `--model`. [Sherpa-ONNX model download](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2) · [NVIDIA Parakeet TDT v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2)
+Run these commands from the project directory. Speech is recognized offline with NVIDIA Parakeet TDT v2 (English, 0.6B parameters, INT8) through Sherpa-ONNX. `setup` downloads the model; to install it by hand, extract it to `models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8`, which contains `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt`, or pass its directory with `--model`. [Sherpa-ONNX model download](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2) · [NVIDIA Parakeet TDT v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2)
 
 The release executable uses the x64 Visual C++ v14 runtime. [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/)
 

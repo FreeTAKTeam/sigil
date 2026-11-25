@@ -5,12 +5,14 @@ mod config;
 mod correlation;
 mod identity;
 mod intents;
+mod model;
 mod output;
 mod processing;
 mod publisher;
 mod radio;
 mod radios;
 mod replay;
+mod setup;
 mod telemetry;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -19,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use kodiak_core::{Engine, WakeWord};
@@ -32,7 +34,7 @@ const DEFAULT_FREQUENCY_HZ: u32 = 435_995_000;
 
 /// Offline speech recognition backends provided by `kodiak-asr`.
 /// NVIDIA Parakeet TDT v2 (English, 0.6B, INT8) is the default when built in.
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, Eq, PartialEq, ValueEnum)]
 enum Backend {
     Whisper,
     #[cfg(feature = "parakeet")]
@@ -53,6 +55,15 @@ impl Backend {
         }
     }
 
+    /// The model release `setup` installs for this backend.
+    fn release(self) -> &'static model::Release {
+        match self {
+            Self::Whisper => &model::WHISPER_BASE_EN,
+            #[cfg(feature = "parakeet")]
+            Self::Parakeet => &model::PARAKEET,
+        }
+    }
+
     fn asr(self) -> kodiak_asr::Backend {
         match self {
             Self::Whisper => kodiak_asr::Backend::Whisper,
@@ -70,6 +81,11 @@ fn kodiak(
     wake: WakeWord,
     settings: &config::Kodiak,
 ) -> Result<Engine> {
+    ensure!(
+        model.exists(),
+        "speech model {} not found; run `r3akt-sigil setup` to install it, or pass --model",
+        model.display()
+    );
     let model = model.to_owned();
     let engine = match settings.classifier {
         config::Classifier::Deterministic => Engine::new(DeterministicClassifier::new()),
@@ -143,6 +159,13 @@ struct CommonArgs {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Guided first installation: install the speech model, test the RTL-SDR
+    /// and write the gateway settings.
+    Setup {
+        /// Gateway settings file to write or update.
+        #[arg(long, default_value = "gateway.toml")]
+        config: PathBuf,
+    },
     /// Receive analog NFM continuously from a USB RTL-SDR.
     Listen {
         #[command(flatten)]
@@ -212,14 +235,27 @@ enum Command {
 #[expect(clippy::too_many_lines, reason = "one match over every subcommand")]
 fn main() -> Result<()> {
     let Cli { common, command } = Cli::parse();
-    let command = match command {
-        Command::Radios { config, action } => return radios::run(&config, action),
-        other => other,
-    };
     let model = common
         .model
         .as_deref()
         .unwrap_or_else(|| common.backend.default_model());
+    let command = match command {
+        Command::Radios { config, action } => return radios::run(&config, action),
+        Command::Setup { config } => {
+            return setup::run(
+                &setup::Setup {
+                    config: &config,
+                    release: common.backend.release(),
+                    model,
+                    frequency_hz: common.frequency_hz,
+                    program: &program(&common),
+                },
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout(),
+            );
+        }
+        other => other,
+    };
     let output = Output::new(common.output_dir, common.frequency_hz, common.save_wav)?;
     match command {
         Command::Listen {
@@ -324,8 +360,30 @@ fn main() -> Result<()> {
             &output,
             &offline_kodiak(config.as_deref(), common.backend, model)?,
         ),
-        Command::Radios { .. } => unreachable!("handled before the output directory is created"),
+        Command::Radios { .. } | Command::Setup { .. } => {
+            unreachable!("handled before the output directory is created")
+        }
     }
+}
+
+/// How this executable was started, with the options that choose the speech
+/// model, for `setup` to show the command that starts the gateway.
+fn program(common: &CommonArgs) -> String {
+    let mut program = setup::quoted(&std::env::args().next().unwrap_or("r3akt-sigil".into()));
+    if common.backend != Backend::DEFAULT {
+        let backend = common
+            .backend
+            .to_possible_value()
+            .expect("no skipped backend");
+        program = format!("{program} --backend {}", backend.get_name());
+    }
+    if let Some(model) = &common.model {
+        program = format!(
+            "{program} --model {}",
+            setup::quoted(&model.display().to_string())
+        );
+    }
+    program
 }
 
 fn bss_wav(path: &Path, diagnostics: bool, output: &Output) -> Result<()> {
