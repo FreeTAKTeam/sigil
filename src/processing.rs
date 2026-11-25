@@ -632,6 +632,10 @@ impl<'a> Coordinator<'a> {
                 log("BSS burst excluded from speech recognition");
                 continue;
             };
+            if !holds_speech(&clip) {
+                log("Transmission held no speech; recognition skipped");
+                continue;
+            }
             let id = format!(
                 "voice-{}-{}",
                 clip.started_at.format("%Y%m%dT%H%M%S%.9fZ"),
@@ -796,6 +800,35 @@ impl<'a> Coordinator<'a> {
 /// resumed. A single noise block after BLACKY's packet on 21 November 2026
 /// otherwise extended the speech past the packet and lost the attribution.
 const RESUMED_SPEECH_FRAMES: usize = 5;
+/// RMS from which a 20 ms block counts as speech, not an open carrier's
+/// background.
+const SPEECH_RMS: f32 = 0.009;
+/// Blocks from the first carrier block that can still hold the open-channel
+/// noise that preceded the carrier.
+const ONSET_FRAMES: u64 = 3;
+/// Speech-level blocks a clip needs before it is recognized: 160 ms. On
+/// 25 November 2026 one-second PTT presses from Corvo (pre-roll noise, a
+/// quiet carrier, then the BSS packet) were transcribed as "Yeah" and
+/// published as chat. In 260 saved clips such presses held at most 5
+/// speech-level blocks after the onset; the shortest spoken sentence held 14.
+const MIN_SPEECH_FRAMES: usize = 8;
+
+fn mean_square(audio: &[f32]) -> f32 {
+    let samples = f32::from(u16::try_from(audio.len()).expect("voice block fits u16"));
+    audio.iter().map(|sample| sample * sample).sum::<f32>() / samples
+}
+
+/// Whether the clip holds enough speech-level audio to be worth recognizing.
+/// Call it after `mask_audio`, which silences the BSS bursts.
+fn holds_speech(clip: &Clip) -> bool {
+    let onset = clip.signal_first_frame.saturating_sub(clip.first_frame) + ONSET_FRAMES;
+    clip.audio
+        .chunks(AUDIO_FRAME_LEN)
+        .skip(usize::try_from(onset).unwrap_or(usize::MAX))
+        .filter(|block| mean_square(block) >= SPEECH_RMS.powi(2))
+        .nth(MIN_SPEECH_FRAMES - 1)
+        .is_some()
+}
 
 fn mask_audio(clip: &mut Clip, masks: &VecDeque<Range<u64>>) -> Option<Range<u64>> {
     let span = clip.signal_first_frame..clip.signal_last_frame + 1;
@@ -818,12 +851,14 @@ fn mask_audio(clip: &mut Clip, masks: &VecDeque<Range<u64>>) -> Option<Range<u64
                 audio.fill(0.0);
                 return false;
             }
-            let samples = f32::from(u16::try_from(audio.len()).expect("voice block fits u16"));
-            let mean_square = audio.iter().map(|sample| sample * sample).sum::<f32>() / samples;
             // The captured radios keep the carrier open after the AFSK frame.
             // Reject that low-level suffix while retaining speech that resumes.
-            let minimum_rms: f32 = if index >= masked_until { 0.009 } else { 0.002 };
-            mean_square >= minimum_rms.powi(2)
+            let minimum_rms: f32 = if index >= masked_until {
+                SPEECH_RMS
+            } else {
+                0.002
+            };
+            mean_square(audio) >= minimum_rms.powi(2)
         })
         .collect();
     // After the last burst, keep only sustained runs: isolated noise blocks
@@ -909,6 +944,44 @@ mod tests {
         clip.audio[37 * AUDIO_FRAME_LEN..38 * AUDIO_FRAME_LEN].fill(0.010);
         assert_eq!(mask_audio(&mut clip, &masks), Some(0..20));
         assert!(clip.audio[20 * AUDIO_FRAME_LEN..].iter().all(|s| *s == 0.0));
+    }
+
+    /// A clip as `Capture` builds it: three pre-roll blocks, then the carrier.
+    fn clip(blocks: &[f32]) -> Clip {
+        let now = Utc::now();
+        Clip {
+            started_at: now,
+            ended_at: now,
+            first_frame: 100,
+            signal_first_frame: 102,
+            signal_last_frame: 99 + blocks.len() as u64,
+            audio: blocks
+                .iter()
+                .flat_map(|level| [*level; AUDIO_FRAME_LEN])
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_ptt_press_without_speech_is_not_recognized() {
+        // Corvo on 25 November 2026: open-channel noise in the pre-roll, a
+        // quiet carrier, one stray block, then the BSS packet (already masked).
+        let mut press = vec![0.1; 4];
+        press.extend([0.004; 10]);
+        press.push(0.012);
+        press.extend([0.004; 2]);
+        press.extend([0.0; 37]);
+        assert!(!holds_speech(&clip(&press)));
+        // Noise that runs on past the onset is still not speech.
+        let mut late_start = vec![0.06; 10];
+        late_start.extend([0.004; 20]);
+        assert!(!holds_speech(&clip(&late_start)));
+        // A single short word is.
+        let mut word = vec![0.1; 4];
+        word.extend([0.004; 10]);
+        word.extend([0.03; 10]);
+        word.extend([0.004; 5]);
+        assert!(holds_speech(&clip(&word)));
     }
 
     fn packet(name: [u8; 2]) -> Result<Vec<f32>> {
@@ -1035,6 +1108,47 @@ mod tests {
 
     fn at(start: DateTime<Utc>, index: usize) -> Result<DateTime<Utc>> {
         Ok(start + TimeDelta::milliseconds(i64::try_from(index * FRAME_MS)?))
+    }
+
+    #[test]
+    fn a_position_only_transmission_reports_its_position_without_recognition() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let output = Output::new(temporary.path().to_owned(), 435_995_000, false)?;
+        // A radio reporting its position: the carrier opens, stays quiet for
+        // 300 ms, then carries the BSS packet. Nobody speaks.
+        let mut signal = vec![0.0; IF_FRAME_LEN * 120];
+        let r4 = packet(*b"R4")?;
+        signal[20 * IF_FRAME_LEN..20 * IF_FRAME_LEN + r4.len()].copy_from_slice(&r4);
+        let r4_end = 20 + r4.len().div_ceil(IF_FRAME_LEN);
+        let recognized = AtomicBool::new(false);
+        let recognize = |_: &Clip| -> Result<KodiakResult> {
+            recognized.store(true, Ordering::Relaxed);
+            Ok(chat("Yeah."))
+        };
+        let start = Utc::now();
+        run(
+            &output,
+            Source::Wav,
+            TIMING,
+            Some(recognize),
+            Some(bss::Decoder::new(IF_RATE, Source::Wav, false, None)?),
+            &AtomicBool::new(false),
+            |ingress| {
+                for (index, frame) in signal.chunks_exact(IF_FRAME_LEN).enumerate() {
+                    let open = (5..r4_end).contains(&index);
+                    let audio = [if open { 0.004 } else { 0.0 }; AUDIO_FRAME_LEN];
+                    ingress.push(open, &audio, frame, at(start, index)?);
+                }
+                Ok(())
+            },
+        )?;
+        let records = recorded(&output)?;
+        assert!(
+            matches!(records.as_slice(), [event] if matches!(&event.kind, Kind::Position { radio_id, .. } if radio_id == "R4")),
+            "expected only R4's position"
+        );
+        assert!(!recognized.load(Ordering::Relaxed));
+        Ok(())
     }
 
     /// Pushes voice-band frames that are open during `bursts`.

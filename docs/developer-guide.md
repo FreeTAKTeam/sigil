@@ -129,6 +129,7 @@ flowchart TD
    - zeroes every block inside a BSS mask (packet span ± 3 guard blocks);
    - after the last mask, zeroes blocks below 0.009 RMS, which removes the quiet carrier tail that radios leave open after the AFSK burst, and counts speech as resumed only after 100 ms (5 blocks) of continuous audio, so a stray noise block cannot extend the speech past a trailing packet;
    - recomputes the audible span and drops the clip if fewer than 5 audible blocks remain. That case is a pure data burst and is logged as "BSS burst excluded from speech recognition".
+   - drops the clip if, after the onset (the pre-roll and the first 3 carrier blocks, which can hold open-channel noise), fewer than 8 blocks (160 ms) reach 0.009 RMS. That case is a PTT press without speech, which the recognizer otherwise turns into a filler word such as "Yeah". It is logged as "Transmission held no speech; recognition skipped".
    - It names the job `voice-<started_at>-<first_frame>` and sends it to ASR with a non-blocking send. A full queue is recorded as a failure.
 3. **`settle`** attributes each pending transcript once both watermarks pass `span.end + window`. It writes the event when both text and attribution are known. It also expires history older than `MAX_CLIP_FRAMES + 2 × window`.
 
